@@ -1,0 +1,190 @@
+# ============================================================
+# BLOQUE A + B integrados
+# Parte A: misma lógica validada (threshold + islands + filtro de candidatas)
+# Parte B: revisión manual antes de fusionar (resaltar / eliminar / confirmar)
+# ============================================================
+
+import numpy as np
+
+UMBRAL_RELATIVO = 0.05
+MARGEN_CENTRALIDAD_MM = 40.0
+
+volumeNodes = slicer.util.getNodesByClass('vtkMRMLScalarVolumeNode')
+
+if len(volumeNodes) == 0:
+    print("No hay ningún volumen cargado. Cargá el DICOM primero.")
+else:
+    volumeNode = volumeNodes[-1]
+    print(f"Usando el volumen: {volumeNode.GetName()}")
+
+    segmentationNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLSegmentationNode')
+    segmentationNode.SetName("Craneo_Automatico")
+    segmentationNode.CreateDefaultDisplayNodes()
+    segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+    segmentId = segmentationNode.GetSegmentation().AddEmptySegment("Hueso")
+
+    segmentEditorWidget = slicer.qMRMLSegmentEditorWidget()
+    segmentEditorWidget.setMRMLScene(slicer.mrmlScene)
+    segmentEditorNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLSegmentEditorNode')
+    segmentEditorWidget.setMRMLSegmentEditorNode(segmentEditorNode)
+    segmentEditorWidget.setSegmentationNode(segmentationNode)
+    segmentEditorWidget.setSourceVolumeNode(volumeNode)
+    segmentEditorWidget.setCurrentSegmentID(segmentId)
+
+    # --- Threshold (igual que siempre) ---
+    segmentEditorWidget.setActiveEffectByName("Threshold")
+    thresholdEffect = segmentEditorWidget.activeEffect()
+    thresholdEffect.setParameter("MinimumThreshold", "300")
+    thresholdEffect.setParameter("MaximumThreshold", "3000")
+    thresholdEffect.self().onApply()
+    print("Threshold aplicado (300-3000 HU).")
+
+    # --- Islands: separar regiones conectadas (igual que siempre) ---
+    segmentEditorWidget.setActiveEffectByName("Islands")
+    islandsEffect = segmentEditorWidget.activeEffect()
+    islandsEffect.setParameter("Operation", "SPLIT_ISLANDS_TO_SEGMENTS")
+    islandsEffect.self().onApply()
+    print("Islas separadas en segmentos individuales.")
+
+    segmentacion = segmentationNode.GetSegmentation()
+    nSegments = segmentacion.GetNumberOfSegments()
+    print(f"Se encontraron {nSegments} islas.")
+
+    ijkToRas = vtk.vtkMatrix4x4()
+    volumeNode.GetIJKToRASMatrix(ijkToRas)
+    def ijk_a_ras(i, j, k):
+        p = ijkToRas.MultiplyPoint([i, j, k, 1])
+        return p[0], p[1], p[2]
+
+    spacing = volumeNode.GetSpacing()
+    voxel_vol_cm3 = (spacing[0] * spacing[1] * spacing[2]) / 1000.0
+
+    datos = []
+    for i in range(nSegments):
+        segId = segmentacion.GetNthSegmentID(i)
+        maskArr = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segId, volumeNode)
+        n_voxels = np.count_nonzero(maskArr)
+        if n_voxels == 0:
+            continue
+        vol_cm3 = n_voxels * voxel_vol_cm3
+        zs, ys, xs = np.where(maskArr > 0)
+        cx, cy, cz = ijk_a_ras(xs.mean(), ys.mean(), zs.mean())
+        datos.append((segId, vol_cm3, cx, cy, cz))
+
+    datos.sort(key=lambda d: d[1], reverse=True)
+
+    # --- Filtro de candidatas: igual logica que el Bloque A ya validado ---
+    ref_segId, ref_vol, ref_cx, ref_cy, ref_cz = datos[0]
+    print(f"\nIsla de referencia (mayor volumen): vol={ref_vol:.2f}cm3")
+
+    candidatas = []
+    for segId, vol, cx, cy, cz in datos:
+        dist_xy = ((cx - ref_cx)**2 + (cy - ref_cy)**2) ** 0.5
+        if dist_xy <= MARGEN_CENTRALIDAD_MM:
+            candidatas.append((segId, vol, dist_xy))
+
+    volumen_mayor = max(c[1] for c in candidatas)
+    candidatasFinales = [c for c in candidatas if c[1] >= volumen_mayor * UMBRAL_RELATIVO]
+
+    # --- Borrar del MRML todo lo que NO sea candidata (ruido, vertebras lejanas, etc) ---
+    idsCandidatas = set(c[0] for c in candidatasFinales)
+    for i in range(nSegments - 1, -1, -1):
+        segId = segmentacion.GetNthSegmentID(i)
+        if segId not in idsCandidatas:
+            segmentacion.RemoveSegment(segId)
+
+    print(f"\nQuedaron {len(candidatasFinales)} islas candidatas (pasaron tamaño + centralidad).")
+    print("ANTES se fusionaban automáticamente. AHORA se detiene aquí para revisión manual.\n")
+
+    # ============================================================
+    # PARTE B: revisión manual antes de fusionar
+    # ============================================================
+
+    islasRevision = []
+    coloresOriginales = {}
+
+    print("--- ISLAS CANDIDATAS (revisar antes de confirmar) ---")
+    for idx, (segId, vol, dist) in enumerate(sorted(candidatasFinales, key=lambda c: c[1], reverse=True), start=1):
+        seg = segmentacion.GetSegment(segId)
+        seg.SetName(f"Isla_{idx}")
+        coloresOriginales[segId] = seg.GetColor()
+        islasRevision.append({"numero": idx, "segId": segId, "vol": vol, "dist": dist})
+        print(f"  [{idx}] vol={vol:.2f}cm3 | dist_centro={dist:.1f}mm")
+    print("------------------------------------------------------\n")
+
+    segmentationNode.CreateClosedSurfaceRepresentation()
+    layoutManager = slicer.app.layoutManager()
+    threeDView = layoutManager.threeDWidget(0).threeDView()
+    threeDView.resetFocalPoint()
+
+    def _segIdPorNumero(numero):
+        for item in islasRevision:
+            if item["numero"] == numero:
+                return item["segId"]
+        print(f"No existe la isla numero {numero}.")
+        return None
+
+    def resaltar(numero):
+        segId = _segIdPorNumero(numero)
+        if segId is None:
+            return
+        for item in islasRevision:
+            seg = segmentacion.GetSegment(item["segId"])
+            if item["segId"] == segId:
+                seg.SetColor(1.0, 0.0, 0.0)
+            else:
+                seg.SetColor(*coloresOriginales[item["segId"]])
+        print(f"Isla {numero} resaltada en rojo.")
+
+    def eliminar(numero):
+        segId = _segIdPorNumero(numero)
+        if segId is None:
+            return
+        segmentacion.RemoveSegment(segId)
+        islasRevision[:] = [it for it in islasRevision if it["segId"] != segId]
+        print(f"Isla {numero} eliminada. Quedan: {[it['numero'] for it in islasRevision]}")
+
+    def mostrar_todas():
+        for item in islasRevision:
+            seg = segmentacion.GetSegment(item["segId"])
+            seg.SetColor(*coloresOriginales[item["segId"]])
+        print("Colores restaurados.")
+
+    def confirmar_craneo():
+        if len(islasRevision) == 0:
+            print("No queda ninguna isla. Revisá si eliminaste de más.")
+            return
+        idsRestantes = [item["segId"] for item in islasRevision]
+        if len(idsRestantes) > 1:
+            segmentEditorWidget2 = slicer.qMRMLSegmentEditorWidget()
+            segmentEditorWidget2.setMRMLScene(slicer.mrmlScene)
+            segEditorNode2 = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLSegmentEditorNode')
+            segmentEditorWidget2.setMRMLSegmentEditorNode(segEditorNode2)
+            segmentEditorWidget2.setSegmentationNode(segmentationNode)
+            segmentEditorWidget2.setSourceVolumeNode(volumeNode)
+
+            primero = idsRestantes[0]
+            segmentEditorWidget2.setCurrentSegmentID(primero)
+            segmentEditorWidget2.setActiveEffectByName("Logical operators")
+            logicalEffect = segmentEditorWidget2.activeEffect()
+            for otro in idsRestantes[1:]:
+                logicalEffect.setParameter("Operation", "UNION")
+                logicalEffect.setParameter("ModifierSegmentID", otro)
+                logicalEffect.self().onApply()
+                segmentacion.RemoveSegment(otro)
+            segmentacion.GetSegment(primero).SetName("Craneo_Final")
+            slicer.mrmlScene.RemoveNode(segEditorNode2)
+        else:
+            segmentacion.GetSegment(idsRestantes[0]).SetName("Craneo_Final")
+
+        segmentationNode.CreateClosedSurfaceRepresentation()
+        threeDView.resetFocalPoint()
+        print("Cráneo final confirmado y fusionado.")
+
+    print("Comandos disponibles:")
+    print("  resaltar(numero)     -> pinta esa isla de rojo, el resto vuelve a su color")
+    print("  eliminar(numero)     -> borra esa isla de la revisión (ej: si es la camilla)")
+    print("  mostrar_todas()      -> restaura colores normales")
+    print("  confirmar_craneo()   -> fusiona lo que haya quedado en un Craneo_Final, como hacía antes el Bloque A")
+
+    segmentEditorWidget = None
