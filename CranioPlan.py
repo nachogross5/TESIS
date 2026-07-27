@@ -22,6 +22,12 @@ from DICOMLib import DICOMUtils
 from slicer import vtkMRMLScalarVolumeNode
 
 
+# Cartel de versión: se imprime en consola al correr los bloques.
+# Sirve para confirmar de un vistazo QUÉ versión está realmente cargada
+# en Slicer (después de un Reload), y no depender de suponerlo.
+CRANIOPLAN_VERSION = "2026-07-26-j (flap por partición geométrica del prisma del lazo: siempre separa)"
+
+
 #
 # CranioPlan
 #
@@ -79,9 +85,18 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._coloresOriginales = {}
         self._botonesIslas = []
 
-        # Estado interno del Bloque F (planificación de osteotomías)
-        self._modeloCraneoActual = None
-        self._fragmentosActuales = []  # hueso vigente: se actualiza tras cada corte
+        # Estado interno del Bloque F (planificación de osteotomías).
+        #
+        # MODELO MENTAL (correcto): en todo momento hay UN "cráneo
+        # restante" (todo el hueso que todavía no se extrajo) y una lista
+        # de fragmentos ya extraídos, que quedan aparte. Cada corte opera
+        # SOLO sobre el cráneo restante; los fragmentos ya extraídos no se
+        # vuelven a cortar. Tras cada corte, el cráneo restante se
+        # reemplaza por el nuevo restante y el/los flap(s) recién
+        # separados se agregan a la lista de extraídos.
+        self._craneoRestante = None        # un vtkMRMLModelNode
+        self._fragmentosExtraidos = []     # lista de vtkMRMLModelNode
+
         self._curvaCorteActual = None
         self._curvaEsCerrada = False  # se fija al trazar, según el checkbox
         self._observadorCurvaTag = None  # para seguir los puntos en tiempo real
@@ -89,6 +104,8 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
+
+        print(f"CranioPlan {CRANIOPLAN_VERSION}: módulo cargado.")
 
         self.logic = CranioPlanLogic()
 
@@ -157,6 +174,11 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.etiquetaAyudaRevision = qt.QLabel(
             "Usá 'Resaltar' para ver cada isla en rojo en el visor 3D.\n"
             "Si una isla es la camilla u otra estructura que no es cráneo, eliminala.\n"
+            "Las marcadas como 'ALEJADA' no tocan el borde del volumen ni están cerca\n"
+            "de la masa principal: pueden ser hueso real separado por una sutura\n"
+            "abierta, o ruido. Revisalas con atención antes de decidir.\n"
+            "Nada se elimina automáticamente salvo la camilla (toca el borde) y el\n"
+            "ruido de pocos vóxeles: lo que quede acá, si lo confirmás, se conserva.\n"
             "Cuando estés conforme, presioná 'Confirmar cráneo'."
         )
         self.etiquetaAyudaRevision.setWordWrap(True)
@@ -180,6 +202,7 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.botonConfirmarCraneo.connect("clicked(bool)", self.onBotonConfirmarCraneoClicked)
 
         self.etiquetaEstadoConfirmacion = qt.QLabel("")
+        self.etiquetaEstadoConfirmacion.setWordWrap(True)
         self.pasoDosLayout.addWidget(self.etiquetaEstadoConfirmacion)
 
         # -------------------------------------------------------
@@ -239,6 +262,7 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         pasoTresLayout.addWidget(self.botonGenerarCorte)
 
         self.etiquetaEstadoCorte = qt.QLabel("Todavía no se planificó ningún corte.")
+        self.etiquetaEstadoCorte.setWordWrap(True)
         self.etiquetaEstadoCorte.setStyleSheet("color: gray;")
         pasoTresLayout.addWidget(self.etiquetaEstadoCorte)
 
@@ -360,10 +384,17 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._segmentationNode, self._islasRevision, self._coloresOriginales = resultado
 
         n = len(self._islasRevision)
-        self.etiquetaEstadoCraneo.setText(
+        nAlejadas = sum(1 for isla in self._islasRevision if isla.get("alejada"))
+        mensaje = (
             f"Se encontraron {n} isla(s) candidata(s). "
             f"{'Revisalas antes de confirmar.' if n > 1 else 'Una sola isla — podés confirmar directamente.'}"
         )
+        if nAlejadas:
+            mensaje += (
+                f"\n{nAlejadas} de ellas está(n) marcada(s) como ALEJADA: revisalas "
+                "con atención, puede ser hueso real separado por una sutura abierta."
+            )
+        self.etiquetaEstadoCraneo.setText(mensaje)
         self.etiquetaEstadoCraneo.setStyleSheet("color: #1F4E79;")
 
         self._construirPanelRevision()
@@ -379,13 +410,23 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             numero = isla["numero"]
             vol = isla["vol"]
             dist = isla["dist"]
+            alejada = isla.get("alejada", False)
 
             filaWidget = qt.QWidget()
             filaLayout = qt.QHBoxLayout(filaWidget)
             filaLayout.setContentsMargins(0, 2, 0, 2)
 
-            etiqueta = qt.QLabel(f"Isla {numero}  |  {vol:.1f} cm3  |  dist. centro: {dist:.0f} mm")
-            etiqueta.setStyleSheet("font-size: 10px;")
+            if alejada:
+                etiqueta = qt.QLabel(
+                    f"Isla {numero}  |  {vol:.1f} cm3  |  {dist:.0f} mm de la masa "
+                    "principal — ALEJADA, revisar"
+                )
+                etiqueta.setStyleSheet("font-size: 10px; color: #B8860B; font-weight: bold;")
+            else:
+                etiqueta = qt.QLabel(f"Isla {numero}  |  {vol:.1f} cm3  |  dist: {dist:.0f} mm")
+                etiqueta.setStyleSheet("font-size: 10px;")
+            # addWidget con factor de stretch: en Slicer 5.10 el argumento
+            # va POSICIONAL. Pasarlo como kwarg (stretch=2) falla en runtime.
             filaLayout.addWidget(etiqueta, 2)
 
             botonResaltar = qt.QPushButton("Resaltar")
@@ -500,21 +541,38 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Exportamos automáticamente a modelo 3D, para que el Paso 3
         # (planificar osteotomía) ya tenga con qué trabajar sin que
         # el usuario tenga que pasar por el módulo Segmentations.
-        self._modeloCraneoActual = self.logic.exportarSegmentoAModelo(
+        # El cráneo restante arranca siendo el cráneo entero confirmado.
+        self._craneoRestante = self.logic.exportarSegmentoAModelo(
             self._segmentationNode, nombreSegmento="Craneo_Final"
         )
-        # El hueso vigente arranca siendo el cráneo entero. Cada corte
-        # va a reemplazar esta lista por los fragmentos resultantes, así
-        # el corte siguiente opera sobre el hueso ya cortado.
-        self._fragmentosActuales = (
-            [self._modeloCraneoActual] if self._modeloCraneoActual else []
-        )
+        self._fragmentosExtraidos = []
+
+        # Un cráneo pediátrico tiene suturas abiertas, así que el hueso
+        # puede venir ya en varias piezas desconectadas antes de cortar
+        # nada. Avisarlo evita confundir una pieza preexistente con un
+        # fragmento creado por el corte — que era justamente el bug del
+        # planificador. Ahora el corte lo tiene en cuenta explícitamente.
+        if self._craneoRestante is not None:
+            piezasIniciales = self.logic.contarPiezasConectadas(
+                self._craneoRestante.GetPolyData()
+            )
+            if piezasIniciales > 1:
+                self.etiquetaEstadoConfirmacion.setText(
+                    f"Cráneo final confirmado.\nAviso: el hueso ya viene en "
+                    f"{piezasIniciales} piezas desconectadas antes de cortar "
+                    "(normal en cráneos pediátricos con suturas abiertas). "
+                    "El planificador de cortes lo tiene en cuenta y NO las "
+                    "confunde con fragmentos de una osteotomía."
+                )
+                self.etiquetaEstadoConfirmacion.setStyleSheet(
+                    "color: #B8860B; font-weight: bold;"
+                )
 
         # A partir de acá se trabaja sobre el MODELO, no sobre la
         # segmentación. Si dejamos las dos visibles, Slicer renderiza el
-        # cráneo dos veces en cada movimiento del mouse — es una de las
-        # causas principales del lag al rotar la vista 3D. Ocultar la
-        # segmentación no pierde nada: sus datos siguen en la escena.
+        # cráneo dos veces en cada movimiento del mouse — una de las causas
+        # del lag al rotar la vista 3D. Ocultar la segmentación no pierde
+        # nada: sus datos siguen en la escena.
         displaySegmentacion = self._segmentationNode.GetDisplayNode()
         if displaySegmentacion is not None:
             displaySegmentacion.SetVisibility(False)
@@ -528,7 +586,7 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # -------------------------------------------------------
 
     def onBotonTrazarCorteClicked(self):
-        if not self._fragmentosActuales:
+        if self._craneoRestante is None:
             self.etiquetaEstadoCorte.setText("Primero confirmá el cráneo (Paso 2).")
             self.etiquetaEstadoCorte.setStyleSheet("color: red;")
             return
@@ -547,14 +605,18 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # definición, sin setter de "closed" — solo GetCurveClosed()
         # para consultar. Para una curva CERRADA usamos directamente la
         # clase vtkMRMLMarkupsClosedCurveNode, que sí cierra el lazo
-        # automáticamente. La Logic ya maneja ambos casos por igual en
-        # _construirParedDeCorte() según GetCurveClosed().
+        # automáticamente. La Logic maneja ambos casos por igual según
+        # la clase real del nodo.
         claseNodo = (
             "vtkMRMLMarkupsClosedCurveNode"
             if self.checkCurvaCerrada.checked
             else "vtkMRMLMarkupsCurveNode"
         )
-        curvaNode = slicer.mrmlScene.AddNewNodeByClass(claseNodo, "Osteotomia_1")
+        # Nombre único: GenerateUniqueName agrega sufijo (_1, _2, ...) si el
+        # nombre ya existe, así no quedan varios nodos "Osteotomia" con el
+        # mismo nombre visible en el panel Data tras varios cortes.
+        nombreCurva = slicer.mrmlScene.GenerateUniqueName("Osteotomia")
+        curvaNode = slicer.mrmlScene.AddNewNodeByClass(claseNodo, nombreCurva)
         curvaNode.CreateDefaultDisplayNodes()
         displayNode = curvaNode.GetDisplayNode()
         if displayNode is not None:
@@ -566,24 +628,13 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             displayNode.SetPointLabelsVisibility(False)       # oculta las etiquetas 5-2, 5-3, etc.
 
         self._curvaCorteActual = curvaNode
-        # Guardamos si es cerrada AHORA (al trazarla), no al generar el
-        # corte: si el usuario toca el checkbox en el medio, lo que vale
-        # es con qué tipo de curva se trazó realmente.
         self._curvaEsCerrada = bool(self.checkCurvaCerrada.checked)
 
-        # Observador: cada vez que se agrega/mueve un punto, refrescamos
-        # la etiqueta de estado con la cantidad de puntos colocados.
         self._observadorCurvaTag = curvaNode.AddObserver(
             slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent,
             self._onPuntoAgregadoALaCurva
         )
 
-        # Delegamos la colocación de puntos al widget oficial de Slicer
-        # (qSlicerMarkupsPlaceWidget), en vez de manejar nosotros mismos
-        # los nodos de interacción/selección. Este widget garantiza que
-        # el nodo pasado a setCurrentNode quede correctamente activo
-        # mientras dura la colocación, evitando que los puntos se
-        # pierdan o queden en otro nodo.
         self.placeWidgetCorte.setCurrentNode(curvaNode)
         self.placeWidgetCorte.setPlaceModePersistency(True)
         self.placeWidgetCorte.setPlaceModeEnabled(True)
@@ -617,17 +668,12 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._observadorCurvaTag = None
 
     def onBotonFinalizarTrazadoClicked(self):
-        # Apagamos el modo de colocación a través del widget oficial —
-        # es lo que garantiza que el nodo quede correctamente finalizado
-        # (en vez de tocar interactionNode a mano, que fue lo que fallaba).
         self.placeWidgetCorte.setPlaceModeEnabled(False)
         self._quitarObservadorCurva()
 
         numeroPuntos = 0 if self._curvaCorteActual is None else self._curvaCorteActual.GetNumberOfControlPoints()
 
         if numeroPuntos < 2:
-            # Diagnóstico: si igual da menos de 2, listamos todas las
-            # curvas de la escena para saber dónde terminaron los puntos.
             print("CranioPlan: DIAGNÓSTICO — curvas presentes en la escena:")
             todasLasCurvas = slicer.util.getNodesByClass("vtkMRMLMarkupsCurveNode")
             for c in todasLasCurvas:
@@ -651,8 +697,14 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.etiquetaEstadoCorte.setStyleSheet("color: #1F4E79;")
 
     def onBotonGenerarCorteClicked(self):
-        if not self._fragmentosActuales:
+        if self._craneoRestante is None:
             self.etiquetaEstadoCorte.setText("Primero confirmá el cráneo (Paso 2).")
+            self.etiquetaEstadoCorte.setStyleSheet("color: red;")
+            return
+        if self._curvaCorteActual is None:
+            self.etiquetaEstadoCorte.setText(
+                "No hay una curva de corte activa. Trazá una línea primero."
+            )
             self.etiquetaEstadoCorte.setStyleSheet("color: red;")
             return
 
@@ -663,51 +715,68 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         grosorMM = self.spinGrosor.value
         volumenActual = self._parameterNode.estudioCargado
 
-        # Cortamos sobre el hueso VIGENTE (los fragmentos que dejó el
-        # corte anterior), no sobre el cráneo original. Así los cortes
-        # se acumulan en vez de pisarse entre sí.
-        fragmentosPrevios = list(self._fragmentosActuales)
+        # El corte opera SOLO sobre el cráneo restante actual. Hacemos una
+        # copia de respaldo de su geometría por si el corte falla, y otra
+        # copia como entrada para la Logic.
+        respaldoPD = vtk.vtkPolyData()
+        respaldoPD.DeepCopy(self._craneoRestante.GetPolyData())
 
-        fragmentosNuevos = self.logic.generarOsteotomia(
-            fragmentosPrevios,
+        mallaRemanente = vtk.vtkPolyData()
+        mallaRemanente.DeepCopy(self._craneoRestante.GetPolyData())
+
+        # Quitamos el nodo viejo del restante ANTES de llamar a la Logic:
+        # así el nuevo "Craneo_restante" queda con nombre limpio (sin
+        # sufijo "_1" feo por colisión de nombres).
+        slicer.mrmlScene.RemoveNode(self._craneoRestante)
+        self._craneoRestante = None
+
+        indiceInicial = len(self._fragmentosExtraidos) + 1
+
+        resultado = self.logic.generarOsteotomia(
+            mallaRemanente,
             self._curvaCorteActual,
             volumenActual,
+            indiceInicialFragmento=indiceInicial,
             grosorMM=grosorMM,
         )
 
-        if not fragmentosNuevos:
+        if not resultado or resultado.get("restante") is None:
+            # El corte falló: reconstruimos el restante desde el respaldo
+            # para no dejar la escena sin cráneo.
+            self._craneoRestante = self.logic.crearModeloDesdePolyData(
+                respaldoPD, "Craneo_restante", (0.9, 0.8, 0.6)
+            )
             self.etiquetaEstadoCorte.setText(
-                "No se pudo calcular el corte. Revisá que la curva esté "
-                "bien trazada sobre el hueso, con al menos 2 puntos."
+                "No se pudo calcular el corte. El cráneo restante quedó intacto. "
+                "Revisá la consola de Python para ver el diagnóstico detallado."
             )
             self.etiquetaEstadoCorte.setStyleSheet("color: red;")
+            # dejamos habilitado 'Generar corte' por si quiere reintentar
             return
 
-        # El corte salió bien: los fragmentos previos ya no representan
-        # el hueso actual, así que los sacamos de la escena.
-        for viejo in fragmentosPrevios:
-            if viejo is not None:
-                slicer.mrmlScene.RemoveNode(viejo)
+        self._craneoRestante = resultado["restante"]
+        nuevosFragmentos = resultado["fragmentos"]
+        self._fragmentosExtraidos.extend(nuevosFragmentos)
 
-        self._fragmentosActuales = fragmentosNuevos
-        self._modeloCraneoActual = fragmentosNuevos[0]  # el mayor: cráneo restante
+        piezasCreadas = resultado["piezasCreadas"]
+        piezasAntes = resultado["piezasAntes"]
 
-        extraidos = len(fragmentosNuevos) - 1
-
-        if extraidos >= 1:
+        if piezasCreadas >= 1:
             self.etiquetaEstadoCorte.setText(
-                f"Corte realizado. Hueso actual: {len(fragmentosNuevos)} pieza(s) — "
-                f"el cráneo restante (color hueso) y {extraidos} fragmento(s) "
-                "extraído(s), resaltados en color.\n"
-                "Podés trazar otro corte sobre el resultado."
+                f"Corte realizado. Se extrajo {piezasCreadas} fragmento(s) nuevo(s), "
+                "resaltado(s) en color; el resto quedó como cráneo restante (un solo "
+                "modelo, aunque tenga varias placas separadas por suturas).\n"
+                f"Total de fragmentos extraídos hasta ahora: {len(self._fragmentosExtraidos)}. "
+                "Podés trazar otro corte sobre el cráneo restante."
             )
             self.etiquetaEstadoCorte.setStyleSheet("color: green;")
         else:
             self.etiquetaEstadoCorte.setText(
-                "El corte se calculó, pero no separó ninguna pieza nueva. "
-                "Si usaste una línea abierta, tené en cuenta que solo separa "
-                "si sus extremos llegan a un borde del hueso: para aislar una "
-                "región en el medio del cráneo, usá 'Curva cerrada'."
+                "El corte se calculó, pero no separó ningún fragmento nuevo del cráneo "
+                "restante.\n"
+                "Si usaste una línea abierta, recordá que solo separa si sus extremos "
+                "llegan a un borde del hueso. Para aislar una región en el medio, usá "
+                "'Curva cerrada'."
             )
             self.etiquetaEstadoCorte.setStyleSheet("color: #B8860B;")
 
@@ -810,17 +879,62 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
     # BLOQUE A + B — Segmentación automática y revisión manual
     # ============================================================
 
-    def generarCandidatas(self, volumeNode):
+    def _tocaBordeDelVolumen(self, mascara):
+        """True si la mascara toca alguna cara del volumen."""
+        return bool(
+            np.any(mascara[0, :, :]) or np.any(mascara[-1, :, :]) or
+            np.any(mascara[:, 0, :]) or np.any(mascara[:, -1, :]) or
+            np.any(mascara[:, :, 0]) or np.any(mascara[:, :, -1])
+        )
+
+    def generarCandidatas(self, volumeNode, umbralMinimoHU=300, umbralMaximoHU=3000,
+                            margenProximidadMM=40.0, umbralRelativo=0.05):
         """
-        BLOQUE A: threshold + islands + filtro de centralidad/tamaño.
-        Se DETIENE antes de fusionar y devuelve las islas candidatas
-        para que el Widget permita la revisión manual del Bloque B.
+        BLOQUE A: threshold + islands + filtro de borde + filtro de
+        proximidad física + filtro de tamaño relativo.
+
+        Esta es la lógica ORIGINAL de Nacho (v5), que dejaba una revisión
+        limpia con solo las placas reales del cráneo. Se restaura tal cual
+        porque el intento anterior (mandar TODO a revisión, sin filtros)
+        llenaba el panel de 24 islas de motitas de 0.1 cm³ y, peor, ensuciaba
+        la malla de Craneo_Final: al unir 24 pedazos, la exportación
+        generaba cientos de regiones y el Bloque F recibía una malla
+        fragmentada imposible de cortar. Filtrar acá mantiene todo limpio.
+
+        Los tres filtros automáticos:
+          (a) BORDE: se descarta toda isla que toque el borde del volumen
+              (camilla, colchoneta, soportes; el cráneo nunca toca el borde).
+          (b) PROXIMIDAD FÍSICA: partiendo de la isla mayor sin tocar borde,
+              se agregan iterativamente las que estén a <= margenProximidadMM
+              de la masa ya aceptada (transformada de distancia euclídea).
+              Esto incorpora los huesos separados por suturas abiertas, que
+              están CERCA aunque su centroide quede lejos. Las que quedan más
+              lejos que el margen se descartan (ruido, camilla parcial, etc.).
+          (c) TAMAÑO RELATIVO: entre las aceptadas, se descartan las menores
+              a umbralRelativo del volumen de la mayor.
+
+        NOTA sobre el bug del hueso posterior (26/07/2026): la porción
+        occipital que "desaparecía al confirmar" NO se perdía acá — sobrevive
+        a estos tres filtros (es una placa grande y cercana). Se perdía en la
+        exportación a modelo, por una limpieza de malla con umbral RELATIVO
+        que borraba placas chicas legítimas. Ese punto se corrigió aparte,
+        en exportarSegmentoAModelo (ahora usa umbral absoluto). Por eso acá se
+        puede restaurar la lógica de Nacho sin reintroducir aquel bug.
+
+        Se DETIENE antes de fusionar y devuelve las piezas candidatas para la
+        revisión manual del Bloque B.
         """
+        print(f"CranioPlan {CRANIOPLAN_VERSION}: Bloque A (generarCandidatas).")
+
         if volumeNode is None:
             return None
 
-        UMBRAL_RELATIVO = 0.05
-        MARGEN_CENTRALIDAD_MM = 40.0
+        try:
+            from scipy import ndimage
+        except ImportError:
+            print("CranioPlan: scipy no disponible; el filtro de proximidad lo necesita. "
+                  "Se usará solo el filtro de borde y el de tamaño relativo.")
+            ndimage = None
 
         segmentationNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLSegmentationNode')
         segmentationNode.SetName("Craneo_Automatico")
@@ -838,8 +952,8 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
 
         segmentEditorWidget.setActiveEffectByName("Threshold")
         thresholdEffect = segmentEditorWidget.activeEffect()
-        thresholdEffect.setParameter("MinimumThreshold", "300")
-        thresholdEffect.setParameter("MaximumThreshold", "3000")
+        thresholdEffect.setParameter("MinimumThreshold", str(umbralMinimoHU))
+        thresholdEffect.setParameter("MaximumThreshold", str(umbralMaximoHU))
         thresholdEffect.self().onApply()
 
         segmentEditorWidget.setActiveEffectByName("Islands")
@@ -849,72 +963,138 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
 
         segmentacion = segmentationNode.GetSegmentation()
         nSegments = segmentacion.GetNumberOfSegments()
+        print(f"CranioPlan: threshold {umbralMinimoHU}-{umbralMaximoHU} HU -> {nSegments} isla(s).")
 
         if nSegments == 0:
             segmentEditorWidget = None
+            slicer.mrmlScene.RemoveNode(segmentEditorNode)
             return None
 
-        ijkToRas = vtk.vtkMatrix4x4()
-        volumeNode.GetIJKToRASMatrix(ijkToRas)
+        espaciado = volumeNode.GetSpacing()
+        muestreoZYX = (espaciado[2], espaciado[1], espaciado[0])
+        volumenVoxelCM3 = (espaciado[0] * espaciado[1] * espaciado[2]) / 1000.0
 
-        def ijk_a_ras(i, j, k):
-            p = ijkToRas.MultiplyPoint([i, j, k, 1])
-            return p[0], p[1], p[2]
-
-        spacing = volumeNode.GetSpacing()
-        voxel_vol_cm3 = (spacing[0] * spacing[1] * spacing[2]) / 1000.0
-
-        datos = []
+        islas = {}
         for i in range(nSegments):
             segId = segmentacion.GetNthSegmentID(i)
-            arr = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segId, volumeNode)
-            n_voxels = np.count_nonzero(arr)
-            if n_voxels == 0:
+            mascara = slicer.util.arrayFromSegmentBinaryLabelmap(
+                segmentationNode, segId, volumeNode
+            ).astype(bool)
+            nVoxeles = int(np.count_nonzero(mascara))
+            if nVoxeles == 0:
                 continue
-            vol_cm3 = n_voxels * voxel_vol_cm3
-            zs, ys, xs = np.where(arr > 0)
-            cx, cy, cz = ijk_a_ras(xs.mean(), ys.mean(), zs.mean())
-            datos.append((segId, vol_cm3, cx, cy, cz))
+            islas[segId] = {
+                "mask": mascara,
+                "vol": nVoxeles * volumenVoxelCM3,
+                "tocaBorde": self._tocaBordeDelVolumen(mascara),
+            }
 
-        if not datos:
+        nPorBorde = sum(1 for d in islas.values() if d["tocaBorde"])
+        print(
+            f"CranioPlan: {nPorBorde} isla(s) descartada(s) por tocar el borde del "
+            "volumen (camilla, colchoneta, soportes)."
+        )
+
+        candidatasPool = {k: v for k, v in islas.items() if not v["tocaBorde"]}
+
+        if not candidatasPool:
+            print(
+                "CranioPlan: todas las islas tocan el borde del volumen. "
+                "Revisa el campo de vision del estudio o los umbrales HU."
+            )
             segmentEditorWidget = None
+            slicer.mrmlScene.RemoveNode(segmentEditorNode)
+            slicer.mrmlScene.RemoveNode(segmentationNode)
             return None
 
-        datos.sort(key=lambda d: d[1], reverse=True)
-        ref_segId, ref_vol, ref_cx, ref_cy, ref_cz = datos[0]
+        refSegId = max(candidatasPool, key=lambda k: candidatasPool[k]["vol"])
+        print(
+            f"CranioPlan: isla de referencia (mayor volumen sin tocar borde): "
+            f"{candidatasPool[refSegId]['vol']:.2f} cm3."
+        )
 
-        candidatas = []
-        for segId, vol, cx, cy, cz in datos:
-            dist_xy = ((cx - ref_cx) ** 2 + (cy - ref_cy) ** 2) ** 0.5
-            if dist_xy <= MARGEN_CENTRALIDAD_MM:
-                candidatas.append((segId, vol, dist_xy))
+        # --- Filtro de proximidad física (descarta las lejanas) ---
+        aceptadas = {refSegId}
+        distanciasPorSegId = {refSegId: 0.0}
+        mascaraAceptada = candidatasPool[refSegId]["mask"].copy()
+        pendientes = {k: v for k, v in candidatasPool.items() if k != refSegId}
 
-        if not candidatas:
-            segmentEditorWidget = None
-            return None
+        if ndimage is not None and pendientes:
+            ronda = 0
+            while pendientes:
+                ronda += 1
+                mapaDistancia = ndimage.distance_transform_edt(
+                    ~mascaraAceptada, sampling=muestreoZYX
+                )
+                nuevas = {}
+                for segId, d in pendientes.items():
+                    distMin = float(mapaDistancia[d["mask"]].min())
+                    if distMin <= margenProximidadMM:
+                        nuevas[segId] = distMin
+                if not nuevas:
+                    break
+                for segId, distMin in nuevas.items():
+                    mascaraAceptada |= pendientes[segId]["mask"]
+                    aceptadas.add(segId)
+                    distanciasPorSegId[segId] = distMin
+                    del pendientes[segId]
+                print(f"CranioPlan:   ronda {ronda}: +{len(nuevas)} isla(s) por proximidad.")
+            if pendientes:
+                print(
+                    f"CranioPlan: {len(pendientes)} isla(s) descartada(s) por estar a más "
+                    f"de {margenProximidadMM:.0f} mm de la masa principal (lejos del cráneo)."
+                )
+        elif pendientes:
+            # Sin scipy no se puede medir proximidad; se aceptan todas las
+            # no-borde y el filtro de tamaño relativo hace la limpieza gruesa.
+            for segId in list(pendientes.keys()):
+                aceptadas.add(segId)
+                distanciasPorSegId[segId] = 0.0
 
-        volumen_mayor = max(c[1] for c in candidatas)
-        candidatasFinales = [c for c in candidatas if c[1] >= volumen_mayor * UMBRAL_RELATIVO]
+        # --- Filtro de tamaño relativo (descarta las chicas) ---
+        volumenMayor = max(candidatasPool[segId]["vol"] for segId in aceptadas)
+        candidatasFinales = [
+            segId for segId in aceptadas
+            if candidatasPool[segId]["vol"] >= volumenMayor * umbralRelativo
+        ]
+        nDescartadasTamano = len(aceptadas) - len(candidatasFinales)
+        if nDescartadasTamano:
+            print(
+                f"CranioPlan: {nDescartadasTamano} isla(s) descartada(s) por tamaño "
+                f"(< {umbralRelativo:.0%} de la mayor, {volumenMayor:.2f} cm3)."
+            )
 
-        idsCandidatas = set(c[0] for c in candidatasFinales)
+        idsCandidatas = set(candidatasFinales)
         for i in range(nSegments - 1, -1, -1):
             segId = segmentacion.GetNthSegmentID(i)
             if segId not in idsCandidatas:
                 segmentacion.RemoveSegment(segId)
 
+        print(
+            f"CranioPlan: {len(candidatasFinales)} pieza(s) candidata(s) "
+            "(pasaron borde + proximidad + tamaño). Se detiene para revisión manual."
+        )
+
         islasRevision = []
         coloresOriginales = {}
-
-        for idx, (segId, vol, dist) in enumerate(
-            sorted(candidatasFinales, key=lambda c: c[1], reverse=True), start=1
-        ):
+        ordenadas = sorted(
+            candidatasFinales, key=lambda s: candidatasPool[s]["vol"], reverse=True
+        )
+        for idx, segId in enumerate(ordenadas, start=1):
+            vol = candidatasPool[segId]["vol"]
+            dist = distanciasPorSegId.get(segId, 0.0)
             seg = segmentacion.GetSegment(segId)
-            seg.SetName(f"Isla_{idx}")
+            seg.SetName(f"Pieza_{idx}")
             coloresOriginales[segId] = seg.GetColor()
-            islasRevision.append({"numero": idx, "segId": segId, "vol": vol, "dist": dist})
+            islasRevision.append({
+                "numero": idx, "segId": segId, "vol": vol, "dist": dist,
+                "alejada": False,
+            })
+            print(f"CranioPlan:   [{idx}] {vol:.2f} cm3 ({dist:.0f} mm de la masa principal).")
 
         segmentationNode.CreateClosedSurfaceRepresentation()
         segmentEditorWidget = None
+        slicer.mrmlScene.RemoveNode(segmentEditorNode)
 
         return segmentationNode, islasRevision, coloresOriginales
 
@@ -964,34 +1144,97 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
     # Decisión de diseño (04/07/2026): se descarta el Curve Cut nativo
     # de Dynamic Modeler (y por extensión el Osteotomy Planner) porque,
     # probado con casos reales del Garrahan:
-    #   (a) confunde islas naturalmente desconectadas (suturas
-    #       craneales abiertas) con resultado de un corte.
+    #   (a) confunde islas naturalmente desconectadas (suturas craneales
+    #       abiertas) con resultado de un corte.
     #   (b) no garantiza atravesar el espesor real del hueso en cada
     #       punto de la curva.
     #
-    # Se construye una pared de corte propia, con profundidad y
-    # orientación calculadas por rayo desde la normal de superficie en
-    # cada punto, y se resta del cráneo con una resta booleana real.
-    # Al ser geometría real (no clasificación superficial), una isla
-    # que la pared no toca queda intacta.
-    #
-    # La profundidad se calcula automáticamente por paciente y por
-    # punto. El grosor (ancho de la hoja) es un dato clínico y queda
-    # expuesto como parámetro editable, pendiente de confirmar con
-    # el instrumental real del Garrahan.
+    # SEGUIMIENTO DE IDENTIDAD (corrección de fondo 26/07/2026): la clave
+    # para distinguir "cráneo restante" de "fragmento extraído" NO es el
+    # tamaño (ranking por volumen), sino la IDENTIDAD de cada pieza. Ver
+    # el docstring de generarOsteotomia.
     # ============================================================
+
+    def contarPiezasConectadas(self, polyData):
+        """Cantidad de componentes conectados de una malla."""
+        if polyData is None or polyData.GetNumberOfPoints() == 0:
+            return 0
+        conectividad = vtk.vtkPolyDataConnectivityFilter()
+        conectividad.SetInputData(polyData)
+        conectividad.SetExtractionModeToAllRegions()
+        conectividad.Update()
+        return int(conectividad.GetNumberOfExtractedRegions())
+
+    def _limpiarRuidoMalla(self, polyData, minimoPuntos=200):
+        """
+        Quita SOLO las regiones conectadas que son ruido de marching cubes
+        (menos de minimoPuntos puntos), preservando cualquier pieza ósea
+        sustancial aunque esté desconectada del resto (huesos separados por
+        suturas abiertas).
+
+        Diferencia clave con la versión anterior (que causaba el bug de
+        pérdida de hueso): el umbral es ABSOLUTO en cantidad de puntos,
+        calibrado al ruido de la conversión segmento->malla, NO relativo al
+        tamaño de la pieza mayor. Un umbral relativo (p. ej. 10% de la
+        mayor) borra un plato occipital chico legítimo por el solo hecho de
+        ser más chico que la bóveda; un umbral absoluto bajo solo elimina
+        specks de pocos puntos y deja intacta cualquier placa real.
+        """
+        if polyData is None or polyData.GetNumberOfPoints() == 0:
+            return polyData
+
+        conectividad = vtk.vtkPolyDataConnectivityFilter()
+        conectividad.SetInputData(polyData)
+        conectividad.SetExtractionModeToAllRegions()
+        conectividad.ColorRegionsOn()
+        conectividad.Update()
+        numeroRegiones = int(conectividad.GetNumberOfExtractedRegions())
+
+        if numeroRegiones <= 1:
+            limpiar = vtk.vtkCleanPolyData()
+            limpiar.SetInputData(polyData)
+            limpiar.Update()
+            salida = vtk.vtkPolyData()
+            salida.DeepCopy(limpiar.GetOutput())
+            return salida
+
+        arrayRegiones = conectividad.GetOutput().GetPointData().GetArray("RegionId")
+        if arrayRegiones is None:
+            return polyData
+
+        conteo = {}
+        for i in range(arrayRegiones.GetNumberOfTuples()):
+            rid = int(arrayRegiones.GetTuple1(i))
+            conteo[rid] = conteo.get(rid, 0) + 1
+
+        aConservar = [rid for rid, c in conteo.items() if c >= minimoPuntos]
+        if not aConservar:
+            # Todo cae bajo el umbral: conservamos la mayor para no vaciar.
+            aConservar = [max(conteo, key=conteo.get)]
+
+        conectividad.SetExtractionModeToSpecifiedRegions()
+        conectividad.InitializeSpecifiedRegionList()
+        for rid in aConservar:
+            conectividad.AddSpecifiedRegion(rid)
+        conectividad.Update()
+
+        limpiar = vtk.vtkCleanPolyData()
+        limpiar.SetInputConnection(conectividad.GetOutputPort())
+        limpiar.Update()
+
+        salida = vtk.vtkPolyData()
+        salida.DeepCopy(limpiar.GetOutput())
+
+        print(
+            f"CranioPlan: limpieza de malla — {numeroRegiones} regiones -> "
+            f"{len(aConservar)} conservada(s) (umbral absoluto {minimoPuntos} puntos)."
+        )
+        return salida
 
     def _decimarMalla(self, polyData, reduccion):
         """
         Reduce la cantidad de triángulos de una malla, preservando la
         topología (no abre agujeros ni separa piezas).
-
-        Marching cubes sobre una TC de 0.5 mm genera cientos de miles de
-        triángulos: mucho más detalle del que se necesita para planificar
-        un corte, y suficiente para que la vista 3D se vuelva lenta al
-        rotar. El error geométrico que introduce la decimación queda muy
-        por debajo del tamaño de voxel del estudio, así que no afecta la
-        precisión de la planificación.
 
         reduccion: fracción de triángulos a eliminar (0.0 a 1.0).
         0.0 desactiva la decimación.
@@ -1014,28 +1257,35 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
             return polyData  # la decimación falló; devolvemos la original
         return resultado
 
+    def crearModeloDesdePolyData(self, polyData, nombre, color):
+        """
+        Crea un vtkMRMLModelNode a partir de un vtkPolyData, con nombre
+        único (GenerateUniqueName) y color/visualización estándar.
+        """
+        if polyData is None or polyData.GetNumberOfPoints() == 0:
+            return None
+        nombreUnico = slicer.mrmlScene.GenerateUniqueName(nombre)
+        nodo = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLModelNode', nombreUnico)
+        nodo.SetAndObservePolyData(polyData)
+        nodo.CreateDefaultDisplayNodes()
+        nodo.GetDisplayNode().SetColor(*color)
+        nodo.GetDisplayNode().SetScalarVisibility(False)
+        return nodo
+
     def exportarSegmentoAModelo(self, segmentationNode, nombreSegmento="Craneo_Final",
                                   reduccionMalla=0.7):
         """
-        Exporta un segmento puntual a un vtkMRMLModelNode, sin pasar
-        por el módulo Segmentations a mano.
+        Exporta un segmento a un vtkMRMLModelNode.
 
-        La conversión de segmento a superficie cerrada suele dejar
-        decenas o cientos de fragmentos diminutos de ruido (voxeles
-        aislados que pasaron el filtro de tamaño relativo del Bloque A
-        por muy poco, sin estar realmente soldados al cráneo). Acá nos
-        quedamos únicamente con la pieza conectada más grande, que es
-        el cráneo real.
+        Corrección 26/07/2026: la limpieza de malla ya NO usa un umbral
+        RELATIVO (que borraba placas óseas chicas legítimas, causando la
+        desaparición del hueso occipital al confirmar). Ahora usa
+        _limpiarRuidoMalla con umbral absoluto, que solo quita specks de
+        marching cubes y conserva todas las placas reales aunque estén
+        desconectadas por suturas abiertas.
 
-        reduccionMalla (0.0 a 1.0): fracción de triángulos a eliminar.
-        Marching cubes sobre una TC de 0.5 mm genera cientos de miles de
-        triángulos — mucho más detalle del que se necesita para
-        planificar un corte, y suficiente para que la vista 3D se vuelva
-        lenta e inusable al rotar el modelo. Con 0.5 se elimina la mitad
-        de los triángulos, preservando la topología (PreserveTopologyOn)
-        y manteniendo el error geométrico muy por debajo del voxel del
-        estudio, así que no afecta la precisión de la planificación.
-        Poner 0.0 desactiva la decimación.
+        reduccionMalla (0.0 a 1.0): fracción de triángulos a eliminar para
+        aligerar el render. 0.0 desactiva la decimación.
         """
         segmentacion = segmentationNode.GetSegmentation()
         segId = segmentacion.GetSegmentIdBySegmentName(nombreSegmento)
@@ -1049,17 +1299,8 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
         if polyDataBruto is None or polyDataBruto.GetNumberOfPoints() == 0:
             return None
 
-        conectividad = vtk.vtkPolyDataConnectivityFilter()
-        conectividad.SetInputData(polyDataBruto)
-        conectividad.SetExtractionModeToLargestRegion()
-        conectividad.Update()
-
-        limpiar = vtk.vtkCleanPolyData()
-        limpiar.SetInputConnection(conectividad.GetOutputPort())
-        limpiar.Update()
-
-        polyData = limpiar.GetOutput()
-        if polyData.GetNumberOfPoints() == 0:
+        polyData = self._limpiarRuidoMalla(polyDataBruto, minimoPuntos=200)
+        if polyData is None or polyData.GetNumberOfPoints() == 0:
             return None
 
         trianguloAntes = polyData.GetNumberOfCells()
@@ -1081,10 +1322,9 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
 
     def _resamplearPuntos(self, puntosOriginales, distanciaMuestreoMM):
         """
-        Recorre la polilínea de una curva y devuelve puntos (numpy
-        arrays) espaciados uniformemente cada distanciaMuestreoMM.
-        Implementación propia, sin depender de utilidades internas
-        de Slicer que puedan variar entre versiones.
+        Recorre la polilínea de una curva y devuelve puntos (numpy arrays)
+        espaciados uniformemente cada distanciaMuestreoMM. Implementación
+        propia, sin depender de utilidades internas de Slicer.
         """
         n = puntosOriginales.GetNumberOfPoints()
         if n < 2:
@@ -1119,86 +1359,68 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
 
         return resampleados
 
-    def _medirNormalYEspesorLocal(self, punto, cellLocator, mallaConNormales,
-                                    distanciaMaximaBusquedaMM=12.0):
+    def _normalPromedioEnPunto(self, punto, pointLocator, normalesArray, radioMM=3.0):
         """
-        Devuelve (normalHaciaAfuera, espesorLocalMM) en un punto sobre
-        la superficie del cráneo, midiendo el espesor con un rayo
-        lanzado hacia adentro desde la normal de superficie.
+        Normal de superficie promediada sobre los vértices dentro de un
+        radio, en vez de tomar la de una sola celda (más estable sobre
+        mallas de marching cubes).
         """
-        cellId = vtk.mutable(0)
-        subId = vtk.mutable(0)
-        dist2 = vtk.mutable(0.0)
-        puntoMasCercano = [0.0, 0.0, 0.0]
+        listaIds = vtk.vtkIdList()
+        pointLocator.FindPointsWithinRadius(radioMM, punto.tolist(), listaIds)
 
-        cellLocator.FindClosestPoint(punto.tolist(), puntoMasCercano, cellId, subId, dist2)
+        if listaIds.GetNumberOfIds() == 0:
+            idCercano = pointLocator.FindClosestPoint(punto.tolist())
+            if idCercano < 0:
+                return None
+            listaIds.InsertNextId(idCercano)
 
-        normales = mallaConNormales.GetCellData().GetNormals()
-        if normales is None:
-            print("CranioPlan DIAGNÓSTICO: la malla no tiene normales por celda calculadas.")
-            return None, None
+        acumulado = np.zeros(3)
+        for j in range(listaIds.GetNumberOfIds()):
+            acumulado += np.array(normalesArray.GetTuple3(listaIds.GetId(j)))
 
-        numeroCeldas = mallaConNormales.GetNumberOfCells()
-        if int(cellId) < 0 or int(cellId) >= numeroCeldas:
-            print(
-                f"CranioPlan DIAGNÓSTICO: cellId fuera de rango ({int(cellId)} de "
-                f"{numeroCeldas}) en punto {punto.tolist()}"
-            )
-            return None, None
+        norma = np.linalg.norm(acumulado)
+        if norma < 1e-6:
+            idCercano = pointLocator.FindClosestPoint(punto.tolist())
+            if idCercano < 0:
+                return None
+            normal = np.array(normalesArray.GetTuple3(idCercano))
+            norma = np.linalg.norm(normal)
+            return normal / norma if norma > 1e-9 else None
 
-        normal = np.array(normales.GetTuple(int(cellId)))
-        normaLongitud = np.linalg.norm(normal)
-        if normaLongitud < 1e-9:
-            print(
-                f"CranioPlan DIAGNÓSTICO: normal degenerada (longitud {normaLongitud}) "
-                f"en punto {punto.tolist()}, celda {int(cellId)}"
-            )
-            return None, None
-        normal = normal / normaLongitud
+        return acumulado / norma
 
-        puntoNp = np.array(puntoMasCercano)
-        inicioRayo = puntoNp + normal * 1.0
-        finRayo = puntoNp - normal * distanciaMaximaBusquedaMM
+    def _medirEspesorLocal(self, punto, normal, cellLocator, distanciaMaximaMM=12.0):
+        """
+        Espesor de hueso bajo un punto: lanza un rayo hacia adentro
+        siguiendo la normal y mide dónde choca con la tabla interna.
+        """
+        inicioRayo = punto + normal * 1.0   # 1 mm afuera, evita auto-interseccion
+        finRayo = punto - normal * distanciaMaximaMM
 
         t = vtk.mutable(0.0)
         xInterseccion = [0.0, 0.0, 0.0]
         pcoords = [0.0, 0.0, 0.0]
-        subIdRayo = vtk.mutable(0)
+        subId = vtk.mutable(0)
 
-        huboInterseccion = cellLocator.IntersectWithLine(
+        hubo = cellLocator.IntersectWithLine(
             inicioRayo.tolist(), finRayo.tolist(), 0.01,
-            t, xInterseccion, pcoords, subIdRayo
+            t, xInterseccion, pcoords, subId
         )
-
-        if huboInterseccion:
-            espesor = np.linalg.norm(np.array(xInterseccion) - puntoNp)
-        else:
-            espesor = distanciaMaximaBusquedaMM
-
-        return normal, espesor
+        if hubo:
+            return float(np.linalg.norm(np.array(xInterseccion) - punto))
+        return distanciaMaximaMM
 
     def _quitarPuntosCoincidentes(self, posiciones, esCerrada, toleranciaMM=0.2):
         """
-        Elimina puntos consecutivos que están (casi) en la misma
-        posición. Un tramo de longitud cero entre dos puntos rompe el
-        cálculo de la tangente (división por cero -> NaN) y arruina
-        toda la pared de corte, sin disparar ningún error explícito.
-
-        Aparecen en dos situaciones:
-          - El usuario colocó un punto encima de otro (por ejemplo,
-            cerrando el lazo a mano cuando la curva ya es cerrada).
-          - GetCurvePointsWorld() de una curva CERRADA devuelve el lazo
-            completo, repitiendo el punto inicial al final para cerrarlo.
-            Ese punto repetido genera un cuadrilátero degenerado al
-            construir la pared.
+        Elimina puntos consecutivos que están (casi) en la misma posición.
+        Un tramo de longitud cero rompe el cálculo de la tangente (NaN) y
+        arruina la pared de corte sin disparar ningún error.
         """
         limpias = []
         for p in posiciones:
             if not limpias or np.linalg.norm(p - limpias[-1]) > toleranciaMM:
                 limpias.append(p)
 
-        # En una curva cerrada, el tramo n-1 -> 0 se construye igual, así
-        # que si el último punto coincide con el primero sobra.
         if esCerrada and len(limpias) > 2:
             if np.linalg.norm(limpias[-1] - limpias[0]) <= toleranciaMM:
                 limpias.pop()
@@ -1207,20 +1429,15 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
 
     def _construirParedDeCorte(self, curvaNode, mallaHueso, grosorMM,
                                  margenSeguridadMM, esCerrada,
-                                 distanciaMuestreoMM=2.0,
-                                 margenExteriorMM=2.0):
+                                 distanciaMuestreoMM=1.0,
+                                 radioNormalMM=3.0):
         """
-        Construye la pared de corte (sólido delgado) que sigue la
-        curva de osteotomía, atravesando el espesor real del hueso
-        en cada punto, con el grosor de hoja configurado.
+        Construye la pared de corte (sólido delgado) que sigue la curva de
+        osteotomía, atravesando el espesor real del hueso en cada punto, con
+        el grosor de hoja configurado.
 
-        mallaHueso es un vtkPolyData (no un nodo): la unión de todos los
-        fragmentos óseos vigentes. Así, tras varios cortes, la pared se
-        calcula contra el hueso tal como está en ese momento, no contra
-        el cráneo original.
-
-        esCerrada se recibe como PARÁMETRO EXPLÍCITO. Ver la nota en
-        generarOsteotomia sobre por qué no se consulta al nodo.
+        mallaHueso es un vtkPolyData: el hueso remanente actual (puede tener
+        varias piezas conexas). La pared se calcula contra ese hueso.
         """
         puntosCurvaOriginal = curvaNode.GetCurvePointsWorld()
         if puntosCurvaOriginal is None or puntosCurvaOriginal.GetNumberOfPoints() < 2:
@@ -1245,12 +1462,22 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
 
         normalesFilter = vtk.vtkPolyDataNormals()
         normalesFilter.SetInputData(mallaHueso)
-        normalesFilter.ComputeCellNormalsOn()
-        normalesFilter.ComputePointNormalsOff()
-        normalesFilter.AutoOrientNormalsOn()
+        normalesFilter.ComputePointNormalsOn()
+        normalesFilter.ComputeCellNormalsOff()
+        normalesFilter.SplittingOff()
         normalesFilter.ConsistencyOn()
+        normalesFilter.AutoOrientNormalsOn()
         normalesFilter.Update()
         mallaConNormales = normalesFilter.GetOutput()
+
+        normalesArray = mallaConNormales.GetPointData().GetNormals()
+        if normalesArray is None:
+            print("CranioPlan DIAGNOSTICO: no se pudieron calcular normales del hueso.")
+            return None
+
+        pointLocator = vtk.vtkPointLocator()
+        pointLocator.SetDataSet(mallaConNormales)
+        pointLocator.BuildLocator()
 
         cellLocator = vtk.vtkCellLocator()
         cellLocator.SetDataSet(mallaConNormales)
@@ -1259,24 +1486,23 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
         normales = []
         espesores = []
         for i in range(n):
-            normal, espesor = self._medirNormalYEspesorLocal(
-                posiciones[i], cellLocator, mallaConNormales
+            normal = self._normalPromedioEnPunto(
+                posiciones[i], pointLocator, normalesArray, radioNormalMM
             )
             if normal is None:
                 print(
-                    f"CranioPlan DIAGNÓSTICO: falló el cálculo de normal/espesor en el "
-                    f"punto {i} de {n} (posición {posiciones[i].tolist()}). "
-                    "Se aborta la pared de corte."
+                    f"CranioPlan DIAGNOSTICO: no se pudo calcular la normal en el "
+                    f"punto {i} de {n}. Se aborta la pared de corte."
                 )
                 return None
             normales.append(normal)
-            espesores.append(espesor)
+            espesores.append(
+                self._medirEspesorLocal(posiciones[i], normal, cellLocator)
+            )
 
-        laterales = []
+        lateralesCrudos = []
         for i in range(n):
             if esCerrada:
-                # En un lazo, el punto anterior al primero es el último,
-                # y el siguiente al último es el primero.
                 tangente = posiciones[(i + 1) % n] - posiciones[(i - 1) % n]
             elif i == 0:
                 tangente = posiciones[1] - posiciones[0]
@@ -1287,9 +1513,6 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
 
             normaTangente = np.linalg.norm(tangente)
             if normaTangente < 1e-9:
-                # Dos puntos coincidentes que se escaparon del filtro.
-                # Sin esta guarda, la división de abajo produce NaN y
-                # toda la pared queda con coordenadas inválidas.
                 print(
                     f"CranioPlan DIAGNÓSTICO: tangente degenerada en el punto {i} de {n} "
                     "(puntos coincidentes). Se aborta la pared de corte."
@@ -1305,15 +1528,24 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
                     referencia = np.array([0.0, 1.0, 0.0])
                 lateral = np.cross(referencia, normales[i])
                 normaLateral = np.linalg.norm(lateral)
-            lateral = lateral / normaLateral
-            laterales.append(lateral)
+            lateralesCrudos.append(lateral / normaLateral)
+
+        # Corrección de continuidad de signo (evita el twist de la pared).
+        laterales = [lateralesCrudos[0]]
+        for i in range(1, n):
+            actual = lateralesCrudos[i]
+            if float(np.dot(actual, laterales[i - 1])) < 0:
+                actual = -actual
+            laterales.append(actual)
+
+        if esCerrada and float(np.dot(laterales[-1], laterales[0])) < 0:
+            print(
+                "CranioPlan DIAGNOSTICO: el lazo tiene un twist impar. La pared puede "
+                "quedar irregular en el punto de cierre; revisa que la curva no se cruce."
+            )
 
         puntosSolido = vtk.vtkPoints()
-        PROFUNDIDAD_MAXIMA_MM = 8.0  # generoso para hueso craneal pediátrico;
-        # evita que un resguardo de medición (cuando el rayo no encuentra
-        # la tabla interna) dispare una pared desproporcionada respecto
-        # al tamaño real de la curva, lo que la haría autointersectarse
-        # en lazos chicos y romper la resta booleana.
+        PROFUNDIDAD_MAXIMA_MM = 8.0
         for i in range(n):
             p = posiciones[i]
             normal = normales[i]
@@ -1383,83 +1615,371 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
 
         return corregirNormales.GetOutput()
 
-    def generarOsteotomia(self, modelosEntrada, curvaNode, volumeNode,
+    def _anilloDeCorteEnVoxeles(self, boneMask, curvaNode, mallaHueso, volumeNode,
+                                 grosorMM, margenSeguridadMM, esCerrada,
+                                 distanciaMuestreoMM=0.5, radioNormalMM=3.0):
+        """
+        Construye el anillo (curva cerrada) o canal (curva abierta) de corte
+        DIRECTAMENTE en el espacio de vóxeles, en vez de mallar un tubo fino
+        y esperar que la vóxelización lo llene. Por cada punto de la curva se
+        barre a lo largo de la normal del hueso (para atravesar todo el
+        espesor) y luego se dilata el resultado el grosor de hoja. Así el
+        anillo es continuo por construcción: inmune al 'twist' del lazo y a
+        los huecos por aliasing, que eran la causa de que el disco no se
+        separara.
+
+        Devuelve una máscara booleana (misma forma que boneMask) con los
+        vóxeles de HUESO a quitar, o None si no se pudo construir.
+        """
+        from scipy import ndimage
+
+        puntosCurva = curvaNode.GetCurvePointsWorld()
+        if puntosCurva is None or puntosCurva.GetNumberOfPoints() < 2:
+            return None
+
+        posiciones = self._resamplearPuntos(puntosCurva, distanciaMuestreoMM)
+        posiciones = self._quitarPuntosCoincidentes(posiciones, esCerrada)
+        posiciones = list(posiciones)
+        if esCerrada and len(posiciones) >= 3:
+            posiciones.append(posiciones[0])  # cerrar el lazo explícitamente
+        n = len(posiciones)
+        if n < 2:
+            return None
+        print(
+            f"CranioPlan DIAGNÓSTICO: curva {'cerrada' if esCerrada else 'abierta'} "
+            f"resampleada a {n} puntos para el barrido en vóxeles."
+        )
+
+        # Normales del hueso (para barrer a lo largo del espesor).
+        normalesFilter = vtk.vtkPolyDataNormals()
+        normalesFilter.SetInputData(mallaHueso)
+        normalesFilter.ComputePointNormalsOn()
+        normalesFilter.ComputeCellNormalsOff()
+        normalesFilter.SplittingOff()
+        normalesFilter.ConsistencyOn()
+        normalesFilter.AutoOrientNormalsOn()
+        normalesFilter.Update()
+        mallaN = normalesFilter.GetOutput()
+        normalesArray = mallaN.GetPointData().GetNormals()
+        if normalesArray is None:
+            print("CranioPlan DIAGNÓSTICO: no se pudieron calcular normales del hueso.")
+            return None
+        pointLocator = vtk.vtkPointLocator()
+        pointLocator.SetDataSet(mallaN)
+        pointLocator.BuildLocator()
+
+        rasToIjk = vtk.vtkMatrix4x4()
+        volumeNode.GetRASToIJKMatrix(rasToIjk)
+
+        dims = boneMask.shape  # (z, y, x)
+        espaciado = volumeNode.GetSpacing()
+        pasoMM = max(min(espaciado) * 0.5, 0.1)
+        PROFUNDIDAD_MM = 8.0  # perpendicular al hueso: no ensancha el corte,
+                              #  solo garantiza atravesar el espesor completo
+
+        # --- Dirección de extrusión por punto: normal local SUAVIZADA ---
+        # Extruir a lo largo de la normal local (perpendicular al hueso)
+        # mantiene el corte fino y pegado a la línea trazada. Pero las normales
+        # crudas cerca de huecos/zonas finas tienen picos que producían gubias
+        # anchas (sobre todo en curvas abiertas). Se suavizan con un promedio
+        # móvil a lo largo de la curva: se conserva la curvatura general y se
+        # matan los picos. Reemplaza al 'eje global' anterior, que cortaba de
+        # más en las zonas inclinadas.
+        normalesPunto = []
+        for p in posiciones:
+            normalesPunto.append(
+                self._normalPromedioEnPunto(p, pointLocator, normalesArray, radioNormalMM)
+            )
+
+        indicesValidos = [i for i, nrm in enumerate(normalesPunto) if nrm is not None]
+        if not indicesValidos:
+            print("CranioPlan DIAGNÓSTICO: no se pudo calcular ninguna normal sobre la curva.")
+            return None
+        # Rellenar faltantes con la normal válida más cercana.
+        for i in range(n):
+            if normalesPunto[i] is None:
+                j = min(indicesValidos, key=lambda k: abs(k - i))
+                normalesPunto[i] = np.array(normalesPunto[j])
+
+        # Alinear todas al sentido medio (evita promediar normales opuestas).
+        media = np.zeros(3)
+        for i in indicesValidos:
+            media = media + normalesPunto[i]
+        if np.linalg.norm(media) > 1e-9:
+            media = media / np.linalg.norm(media)
+            for i in range(n):
+                if float(np.dot(normalesPunto[i], media)) < 0:
+                    normalesPunto[i] = -normalesPunto[i]
+
+        # Promedio móvil a lo largo de la curva (circular si es cerrada).
+        ventana = 3  # a cada lado => 7 puntos ~ 3 mm
+        normalesSuaves = []
+        for i in range(n):
+            acum = np.zeros(3)
+            for d in range(-ventana, ventana + 1):
+                if esCerrada:
+                    k = (i + d) % n
+                else:
+                    k = min(max(i + d, 0), n - 1)
+                acum = acum + normalesPunto[k]
+            norma = np.linalg.norm(acum)
+            normalesSuaves.append(acum / norma if norma > 1e-9 else normalesPunto[i])
+
+        curtain = np.zeros(dims, dtype=bool)
+
+        def marcar(rasXYZ):
+            ijk = [0.0, 0.0, 0.0, 0.0]
+            rasToIjk.MultiplyPoint([float(rasXYZ[0]), float(rasXYZ[1]), float(rasXYZ[2]), 1.0], ijk)
+            ii = int(round(ijk[0]))
+            jj = int(round(ijk[1]))
+            kk = int(round(ijk[2]))
+            if 0 <= kk < dims[0] and 0 <= jj < dims[1] and 0 <= ii < dims[2]:
+                curtain[kk, jj, ii] = True
+
+        for i, p in enumerate(posiciones):
+            direccion = normalesSuaves[i]
+            t = -PROFUNDIDAD_MM
+            while t <= PROFUNDIDAD_MM:
+                marcar(np.asarray(p, dtype=float) + direccion * t)
+                t += pasoMM
+
+        if not curtain.any():
+            return None
+
+        # Dilatar el grosor de hoja (kerf). Estructura 3x3x3 (26-conexa): es
+        # la que garantiza un anillo CONTINUO sin huecos diagonales sobre la
+        # trayectoria curva. La 6-conexa dejaba fugas de 1 vóxel y el disco no
+        # se separaba. El ancho lateral queda ~1.5 mm; el corte ya es preciso
+        # porque la extrusión es perpendicular al hueso (sin inclinación).
+        radioVox = max(1, int(round((grosorMM / 2.0) / min(espaciado))))
+        estructura = np.ones((3, 3, 3), dtype=bool)
+        curtainDil = ndimage.binary_dilation(curtain, structure=estructura, iterations=radioVox)
+
+        anillo = np.logical_and(curtainDil, boneMask)
+        if not anillo.any():
+            return None
+        return anillo
+
+    def _centroideRASDeMascara(self, mascara, volumeNode):
+        """Centroide en coordenadas RAS de una máscara booleana (en la
+        geometría del volumeNode). Devuelve np.array([x, y, z]) o None."""
+        indices = np.argwhere(mascara)  # columnas z, y, x
+        if indices.shape[0] == 0:
+            return None
+        cen = indices.mean(axis=0)  # [zc, yc, xc]
+        ijk = [float(cen[2]), float(cen[1]), float(cen[0]), 1.0]  # x, y, z, 1
+        m = vtk.vtkMatrix4x4()
+        volumeNode.GetIJKToRASMatrix(m)
+        ras = [0.0, 0.0, 0.0, 0.0]
+        m.MultiplyPoint(ijk, ras)
+        return np.array(ras[:3])
+
+    def _puntoDentroDelLazo(self, puntoRAS, puntosLazoRAS):
+        """
+        True si puntoRAS cae DENTRO del lazo cerrado definido por
+        puntosLazoRAS (lista de np.array Nx3), proyectando ambos al plano de
+        mejor ajuste del lazo y haciendo un test punto-en-polígono 2D.
+
+        Se usa para identificar, SIN depender del tamaño, qué piezas quedaron
+        encerradas por una osteotomía de curva cerrada (el flap) frente a las
+        que quedaron afuera (el resto del cráneo). Es robusto aunque el flap
+        sea muy chico, que es donde el criterio por volumen fallaba.
+        """
+        pts = np.asarray(puntosLazoRAS, dtype=float)
+        if pts.shape[0] < 3:
+            return False
+        c0 = pts.mean(axis=0)
+        # Los dos vectores singulares de mayor varianza definen el plano del
+        # lazo; el tercero es la normal (que no usamos).
+        _, _, vh = np.linalg.svd(pts - c0)
+        u = vh[0]
+        v = vh[1]
+        poligono = np.array([[(p - c0).dot(u), (p - c0).dot(v)] for p in pts])
+        q = np.array([(puntoRAS - c0).dot(u), (puntoRAS - c0).dot(v)])
+
+        dentro = False
+        n = len(poligono)
+        j = n - 1
+        for i in range(n):
+            xi, yi = poligono[i]
+            xj, yj = poligono[j]
+            if ((yi > q[1]) != (yj > q[1])) and \
+               (q[0] < (xj - xi) * (q[1] - yi) / (yj - yi + 1e-12) + xi):
+                dentro = not dentro
+            j = i
+        return dentro
+
+    def _puntosDentroPoligono2D(self, P, poligono):
+        """Vectorizado: para P (Nx2) devuelve un bool array indicando si cada
+        punto cae dentro del polígono (Mx2), por ray casting."""
+        x = P[:, 0]
+        y = P[:, 1]
+        dentro = np.zeros(len(P), dtype=bool)
+        n = len(poligono)
+        j = n - 1
+        for i in range(n):
+            xi, yi = poligono[i]
+            xj, yj = poligono[j]
+            cond = ((yi > y) != (yj > y)) & \
+                   (x < (xj - xi) * (y - yi) / ((yj - yi) + 1e-12) + xi)
+            dentro = np.logical_xor(dentro, cond)
+            j = i
+        return dentro
+
+    def _particionPorPrismaDelLazo(self, boneMask, loopRAS, volumeNode, slabMM=25.0):
+        """
+        Parte el hueso (boneMask) en (flapMask, restanteMask) según el PRISMA
+        del lazo cerrado: un vóxel pertenece al flap si su proyección cae
+        DENTRO del polígono del lazo (proyectado a su plano de mejor ajuste) Y
+        está a menos de ±slabMM del plano. Todo lo demás va al restante.
+
+        Es una partición puramente GEOMÉTRICA: no usa conectividad, así que
+        SIEMPRE separa correctamente el hueso encerrado por el lazo, aunque el
+        anillo de corte no lo haya desconectado (que es lo que fallaba cerca de
+        los agujeros/suturas abiertas, donde quedaban puentes de hueso).
+
+        La franja ±slabMM evita que el prisma (infinito) capture hueso de la
+        pared opuesta del cráneo que quede sobre el mismo eje.
+        """
+        pts = np.asarray(loopRAS, dtype=float)
+        if pts.shape[0] < 3:
+            return None, None
+        c0 = pts.mean(axis=0)
+        _, _, vh = np.linalg.svd(pts - c0)
+        u = vh[0]
+        v = vh[1]
+        eje = vh[2]
+        poligono = np.column_stack([(pts - c0) @ u, (pts - c0) @ v])
+
+        indices = np.argwhere(boneMask)  # N x 3 (z, y, x)
+        if indices.shape[0] == 0:
+            return None, None
+
+        M = vtk.vtkMatrix4x4()
+        volumeNode.GetIJKToRASMatrix(M)
+        Mnp = np.array([[M.GetElement(r, c) for c in range(4)] for r in range(4)])
+        # IJK homogéneo por vóxel: (i=x, j=y, k=z, 1)
+        ijk = np.column_stack([
+            indices[:, 2], indices[:, 1], indices[:, 0], np.ones(len(indices))
+        ]).astype(float)
+        ras = (ijk @ Mnp.T)[:, :3]
+
+        rel = ras - c0
+        s = rel @ eje
+        a = rel @ u
+        b = rel @ v
+        enSlab = np.abs(s) <= slabMM
+        dentroPoli = self._puntosDentroPoligono2D(np.column_stack([a, b]), poligono)
+        esFlap = enSlab & dentroPoli
+
+        flapMask = np.zeros_like(boneMask)
+        restMask = np.zeros_like(boneMask)
+        zc = indices[:, 0]
+        yc = indices[:, 1]
+        xc = indices[:, 2]
+        flapMask[zc[esFlap], yc[esFlap], xc[esFlap]] = True
+        noFlap = ~esFlap
+        restMask[zc[noFlap], yc[noFlap], xc[noFlap]] = True
+        return flapMask, restMask
+
+    def generarOsteotomia(self, mallaRemanente, curvaNode, volumeNode,
+                            indiceInicialFragmento=1,
                             grosorMM=1.0, margenSeguridadMM=3.0,
-                            volumenMinimoFragmentoMM3=50.0,
+                            volumenMinimoFragmentoMM3=300.0,
                             reduccionMallaFragmentos=0.7):
         """
-        Ejecuta un corte de osteotomía sobre el hueso vigente.
+        Ejecuta un corte de osteotomía sobre el cráneo remanente.
 
-        modelosEntrada: LISTA de vtkMRMLModelNode con los fragmentos
-        óseos actuales. En el primer corte es una lista de un solo
-        elemento (el cráneo completo). En los cortes siguientes son los
-        fragmentos que dejó el corte anterior.
+        mallaRemanente: vtkPolyData con TODO el hueso que todavía no se
+        extrajo (el cráneo restante actual). Puede tener varias piezas
+        conexas (placas separadas por suturas abiertas). El corte se aplica
+        solo sobre este hueso.
 
-        CORTES ENCADENADOS — corrección (11/07/2026): antes esta función
-        recibía siempre el modelo del cráneo ORIGINAL, así que el segundo
-        corte re-cortaba el cráneo intacto y descartaba el resultado del
-        primero. Ahora recibe los fragmentos vigentes, los fusiona en un
-        único volumen de hueso, aplica el corte sobre esa unión y vuelve
-        a separar en piezas. Así cada corte se acumula sobre el anterior.
+        SEGUIMIENTO DE IDENTIDAD — corrección de fondo (26/07/2026):
+        --------------------------------------------------------------
+        El bug de raíz de todas las versiones anteriores era decidir "qué es
+        cráneo restante" y "qué es fragmento extraído" por TAMAÑO: la pieza
+        más grande = restante, todas las demás = extraídas. Eso está mal
+        porque un cráneo pediátrico ya viene partido en varias placas
+        grandes ANTES de cortar (suturas abiertas). El ranking por tamaño
+        tomaba esas placas naturales y las llamaba "fragmentos extraídos",
+        aunque el corte nunca las tocó.
 
-        MOTOR DE CORTE: resta VOLUMÉTRICA (por voxeles) con el Segment
-        Editor, no booleano de mallas. El filtro booleano de mallas de
-        VTK (vtkBooleanOperationPolyDataFilter) falló sistemáticamente
-        sobre mallas craneales reales (errores de vtkDelaunay2D y de
-        vtkIntersectionPolyDataFilter). La resta por voxeles no usa
-        triangulación de intersecciones, así que no puede fallar por esa
-        vía. Contrapartida: la precisión queda limitada al voxel del
-        estudio (0.5 mm), más fino que el grosor de hoja que se
-        planifica (~1 mm), por lo que no es una limitación práctica.
+        La solución correcta es rastrear la IDENTIDAD de cada pieza:
+          1. Se voxeliza el hueso de entrada y se etiquetan sus componentes
+             conexos ANTES de cortar (scipy.ndimage.label -> "piezas madre").
+          2. Se resta la pared de corte (solo QUITA vóxeles) y se re-separan
+             las islas -> "piezas hija".
+          3. Como restar solo quita vóxeles, cada hija es subconjunto de
+             exactamente una madre. Se mapea cada hija a su madre por la
+             etiqueta mayoritaria bajo su máscara.
+          4. Por cada madre:
+               - si produjo <=1 hija real -> el corte NO la separó: va
+                 ENTERA al cráneo restante (aunque no sea la más grande).
+               - si produjo >=2 hijas reales -> el corte SÍ la separó: la
+                 mayor queda en el restante, las otras son flaps extraídos,
+                 y las esquirlas (< volumenMinimoFragmentoMM3) vuelven al
+                 restante (conserva el volumen óseo).
+          5. Craneo_restante = unión (vtkAppendPolyData) de todas las piezas
+             del bucket restante, en UN solo modelo (puede tener varias
+             placas). Un modelo Fragmento_extraido por flap.
 
-        Devuelve la lista de vtkMRMLModelNode resultantes (los fragmentos
-        óseos tras este corte), o lista vacía si el corte no se pudo
-        calcular.
+        Así, con un único corte de lazo cerrado sobre una placa, el
+        resultado es exactamente: 1 fragmento extraído + el resto del cráneo
+        (todas las demás placas + el remanente de la placa cortada), sin
+        importar cuántas placas naturales haya ni cuál sea la más grande.
+
+        indiceInicialFragmento: número con el que arranca la numeración de
+        los fragmentos de ESTE corte (para que en cortes sucesivos los
+        nombres sigan la cuenta: Fragmento_extraido_1, _2, _3, ...).
+
+        volumenMinimoFragmentoMM3: umbral absoluto (300 mm³ = 0.3 cm³ por
+        defecto) para distinguir un flap real de una esquirla de la
+        vóxelización. Provisional: falta validar con más casos del Garrahan
+        que no descarte un fragmento pediátrico legítimamente chico.
+
+        MOTOR DE CORTE: resta volumétrica (por vóxeles) con el Segment
+        Editor, no booleano de mallas (vtkBooleanOperationPolyDataFilter
+        falla sistemáticamente en mallas craneales reales). Precisión
+        limitada al vóxel (0.5 mm), más fino que el grosor de hoja (~1 mm).
+
+        Devuelve un dict:
+          {"restante": modelNode, "fragmentos": [modelNode, ...],
+           "piezasCreadas": int, "piezasAntes": int}
+        o None si el corte no se pudo calcular.
         """
-        if not modelosEntrada or curvaNode is None or volumeNode is None:
-            print("CranioPlan DIAGNÓSTICO: falta el hueso, la curva o el volumen.")
-            return []
+        print(f"CranioPlan {CRANIOPLAN_VERSION}: Bloque F (generarOsteotomia).")
 
-        # --- Determinar si la curva es cerrada ---
-        # FUENTE DE VERDAD: la clase real del nodo. Ni GetCurveClosed()
-        # ni el estado del checkbox resultaron confiables en Slicer 5.10
-        # (ambos reportaron "abierta" para un lazo creado y dibujado como
-        # vtkMRMLMarkupsClosedCurveNode). IsA() consulta la jerarquía de
-        # clases de VTK, así que refleja qué tipo de nodo se creó.
+        if mallaRemanente is None or curvaNode is None or volumeNode is None:
+            print("CranioPlan DIAGNÓSTICO: falta el hueso, la curva o el volumen.")
+            return None
+        if mallaRemanente.GetNumberOfPoints() == 0:
+            print("CranioPlan DIAGNÓSTICO: la malla de hueso remanente está vacía.")
+            return None
+
+        try:
+            from scipy import ndimage
+        except ImportError:
+            print(
+                "CranioPlan DIAGNÓSTICO: scipy no está disponible. El seguimiento de "
+                "identidad de piezas lo necesita; sin él no se puede distinguir un flap "
+                "real de una placa natural. Se aborta el corte."
+            )
+            return None
+
         esCerrada = bool(curvaNode.IsA("vtkMRMLMarkupsClosedCurveNode"))
         print(
             f"CranioPlan DIAGNÓSTICO: curva {curvaNode.GetClassName()} -> "
-            f"{'CERRADA' if esCerrada else 'ABIERTA'}. "
-            f"Hueso de entrada: {len(modelosEntrada)} fragmento(s)."
+            f"{'CERRADA' if esCerrada else 'ABIERTA'}."
         )
 
-        # --- Fusionar los fragmentos vigentes en una sola malla ---
-        # Sirve para dos cosas: medir normales/espesor para la pared, y
-        # cargar todo el hueso como un único segmento a cortar.
-        fusionar = vtk.vtkAppendPolyData()
-        for modelo in modelosEntrada:
-            if modelo is not None and modelo.GetPolyData() is not None:
-                fusionar.AddInputData(modelo.GetPolyData())
-        fusionar.Update()
-        mallaHueso = fusionar.GetOutput()
-
-        if mallaHueso is None or mallaHueso.GetNumberOfPoints() == 0:
-            print("CranioPlan DIAGNÓSTICO: la malla de hueso de entrada está vacía.")
-            return []
-
-        paredDeCorte = self._construirParedDeCorte(
-            curvaNode, mallaHueso, grosorMM, margenSeguridadMM, esCerrada
-        )
-        if paredDeCorte is None:
-            print("CranioPlan DIAGNÓSTICO: no se pudo construir la pared de corte (ver arriba).")
-            return []
+        piezasAntesMalla = self.contarPiezasConectadas(mallaRemanente)
         print(
-            f"CranioPlan DIAGNÓSTICO: pared de corte con "
-            f"{paredDeCorte.GetNumberOfPoints()} puntos y "
-            f"{paredDeCorte.GetNumberOfCells()} celdas."
+            f"CranioPlan: hueso remanente de entrada — {piezasAntesMalla} pieza(s) "
+            "conexa(s) según la malla."
         )
 
-        # --- Segmentación temporal donde hacemos el corte por voxeles ---
+        # --- Segmentación temporal donde se hace el corte por vóxeles ---
         segCorte = slicer.mrmlScene.AddNewNodeByClass(
             'vtkMRMLSegmentationNode', 'CranioPlan_Corte_Temporal'
         )
@@ -1467,16 +1987,12 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
         segCorte.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
 
         idHueso = segCorte.AddSegmentFromClosedSurfaceRepresentation(
-            mallaHueso, "Hueso", [0.9, 0.8, 0.6]
+            mallaRemanente, "Hueso", [0.9, 0.8, 0.6]
         )
-        idPared = segCorte.AddSegmentFromClosedSurfaceRepresentation(
-            paredDeCorte, "ParedDeCorte", [1.0, 0.2, 0.2]
-        )
-
-        if not idHueso or not idPared:
-            print("CranioPlan DIAGNÓSTICO: no se pudo importar el hueso o la pared a la segmentación.")
+        if not idHueso:
+            print("CranioPlan DIAGNÓSTICO: no se pudo importar el hueso a la segmentación.")
             slicer.mrmlScene.RemoveNode(segCorte)
-            return []
+            return None
 
         segmentEditorWidget = slicer.qMRMLSegmentEditorWidget()
         segmentEditorWidget.setMRMLScene(slicer.mrmlScene)
@@ -1485,120 +2001,194 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
         segmentEditorWidget.setSegmentationNode(segCorte)
         segmentEditorWidget.setSourceVolumeNode(volumeNode)
 
-        # --- Resta volumétrica: hueso MENOS pared de corte ---
-        segmentEditorWidget.setCurrentSegmentID(idHueso)
-        segmentEditorWidget.setActiveEffectByName("Logical operators")
-        efectoLogico = segmentEditorWidget.activeEffect()
-        efectoLogico.setParameter("Operation", "SUBTRACT")
-        efectoLogico.setParameter("ModifierSegmentID", idPared)
-        efectoLogico.self().onApply()
+        # === PASO 1 de identidad: etiquetar las piezas madre ANTES de cortar ===
+        boneArrAntes = slicer.util.arrayFromSegmentBinaryLabelmap(segCorte, idHueso, volumeNode)
+        boneMaskAntes = boneArrAntes.astype(bool)  # astype copia; no es vista viva
+        labeledAntes, nMadres = ndimage.label(boneMaskAntes)
+        print(f"CranioPlan: {nMadres} pieza(s) madre etiquetada(s) por vóxeles ANTES del corte.")
 
-        segCorte.GetSegmentation().RemoveSegment(idPared)
+        # === PASO 2: construir el anillo de corte EN VÓXELES y restarlo ===
+        # No se malla un tubo delgado (eso producía el 'twist' del lazo y
+        # huecos por aliasing que dejaban el corte incompleto). El anillo se
+        # arma barriendo la curva a lo largo de la normal del hueso y
+        # dilatándola el grosor de hoja: continuo por construcción.
+        anilloCorte = self._anilloDeCorteEnVoxeles(
+            boneMaskAntes, curvaNode, mallaRemanente, volumeNode,
+            grosorMM, margenSeguridadMM, esCerrada
+        )
+        if anilloCorte is None:
+            print("CranioPlan DIAGNÓSTICO: no se pudo construir el anillo de corte en vóxeles.")
+            segmentEditorWidget = None
+            slicer.mrmlScene.RemoveNode(segEditorNode)
+            slicer.mrmlScene.RemoveNode(segCorte)
+            return None
 
-        # --- Separar el resultado en piezas conectadas ---
-        segmentEditorWidget.setCurrentSegmentID(idHueso)
-        segmentEditorWidget.setActiveEffectByName("Islands")
-        efectoIslas = segmentEditorWidget.activeEffect()
-        efectoIslas.setParameter("Operation", "SPLIT_ISLANDS_TO_SEGMENTS")
-        efectoIslas.self().onApply()
+        nVoxAnillo = int(np.count_nonzero(anilloCorte))
+        print(
+            f"CranioPlan DIAGNÓSTICO: anillo de corte = {nVoxAnillo} vóxeles de hueso a quitar "
+            f"(grosor {grosorMM:.1f} mm)."
+        )
 
-        segmentacion = segCorte.GetSegmentation()
-        numeroPiezas = segmentacion.GetNumberOfSegments()
+        boneCut = np.logical_and(boneMaskAntes, np.logical_not(anilloCorte)).astype(np.uint8)
+        slicer.util.updateSegmentBinaryLabelmapFromArray(
+            boneCut, segCorte, idHueso, volumeNode
+        )
 
-        # --- Medir el volumen REAL de cada pieza ---
-        espaciado = volumeNode.GetSpacing()
-        volumenVoxelMM3 = espaciado[0] * espaciado[1] * espaciado[2]
-
-        piezas = []
-        for i in range(numeroPiezas):
-            segId = segmentacion.GetNthSegmentID(i)
-            arr = slicer.util.arrayFromSegmentBinaryLabelmap(segCorte, segId, volumeNode)
-            voxeles = int(np.count_nonzero(arr))
-            if voxeles == 0:
-                continue
-            volumenMM3 = voxeles * volumenVoxelMM3
-            piezas.append((volumenMM3, voxeles, segId))
-
+        # === PASO 3: descomponer el resultado del corte ===
+        # Ya no se usa el Segment Editor para separar por islas: la
+        # clasificación se hace sobre las máscaras de vóxeles (numpy), más
+        # robusto. Para curva CERRADA se parte por geometría (prisma del lazo);
+        # para ABIERTA, por identidad de piezas conexas.
         segmentEditorWidget = None
         slicer.mrmlScene.RemoveNode(segEditorNode)
 
-        if not piezas:
-            print("CranioPlan DIAGNÓSTICO: no quedó ninguna pieza con contenido tras el corte.")
-            slicer.mrmlScene.RemoveNode(segCorte)
-            return []
+        espaciado = volumeNode.GetSpacing()
+        volumenVoxelMM3 = espaciado[0] * espaciado[1] * espaciado[2]
+        boneCutMask = boneCut.astype(bool)
 
-        piezas.sort(key=lambda p: p[0], reverse=True)
+        flapMasks = []        # una máscara booleana por flap extraído
+        restanteMask = None
 
-        print(f"CranioPlan DIAGNÓSTICO: tras la resta quedaron {len(piezas)} pieza(s):")
-        for volumenMM3, voxeles, segId in piezas:
-            estado = "SE CONSERVA" if volumenMM3 >= volumenMinimoFragmentoMM3 else "se descarta (ruido)"
-            print(f"    - {volumenMM3 / 1000.0:.2f} cm3 ({voxeles} voxeles) -> {estado}")
+        if esCerrada:
+            # ---- CLASIFICACIÓN GEOMÉTRICA POR EL PRISMA DEL LAZO ----
+            # El flap es el hueso ENCERRADO por el lazo (dentro del polígono
+            # proyectado y dentro de ±slab del plano). Partición pura por
+            # geometría: NO depende de que el anillo haya desconectado el disco
+            # por conectividad (que fallaba cerca de agujeros dejando puentes).
+            # Por eso SIEMPRE separa el flap del resto.
+            puntosLazo = curvaNode.GetCurvePointsWorld()
+            loopRAS = None
+            if puntosLazo is not None and puntosLazo.GetNumberOfPoints() >= 3:
+                loopRAS = np.array([puntosLazo.GetPoint(i)
+                                    for i in range(puntosLazo.GetNumberOfPoints())])
 
-        # UMBRAL ABSOLUTO, no relativo. Un umbral relativo al fragmento
-        # más grande (p. ej. 1%) descarta por error el disco de una
-        # osteotomía, que es legítimamente chico frente al resto del
-        # cráneo. Lo que distingue ruido de hueso real es un volumen
-        # mínimo absoluto, no su proporción respecto del cráneo entero.
-        piezasValidas = [p for p in piezas if p[0] >= volumenMinimoFragmentoMM3]
+            if loopRAS is None:
+                print("CranioPlan DIAGNÓSTICO: no pude leer los puntos del lazo; todo al restante.")
+                restanteMask = boneCutMask
+            else:
+                flapMask, restMask = self._particionPorPrismaDelLazo(
+                    boneCutMask, loopRAS, volumeNode
+                )
+                nFlap = int(np.count_nonzero(flapMask)) if flapMask is not None else 0
+                nRest = int(np.count_nonzero(restMask)) if restMask is not None else 0
+                print(
+                    "CranioPlan DIAGNÓSTICO: partición geométrica por el prisma del lazo -> "
+                    f"flap {nFlap * volumenVoxelMM3 / 1000.0:.2f} cm3 ({nFlap} vóx), "
+                    f"restante {nRest * volumenVoxelMM3 / 1000.0:.2f} cm3."
+                )
+                UMBRAL_FLAP_VOXELES = 30
+                if flapMask is not None and nFlap >= UMBRAL_FLAP_VOXELES:
+                    flapMasks.append(flapMask)
+                    restanteMask = restMask
+                else:
+                    print("CranioPlan DIAGNÓSTICO: casi no hay hueso dentro del lazo; 0 flaps.")
+                    restanteMask = boneCutMask
+        else:
+            # ---- CURVA ABIERTA: identidad por conectividad ----
+            # Una línea abierta solo separa hueso si cruza una placa de lado a
+            # lado. Se etiquetan las piezas conexas tras el corte y se comparan
+            # con las madre: si una madre se partió en >=2 piezas reales, la
+            # mayor queda en el restante y las otras son flaps.
+            labeledCut, nHijas = ndimage.label(boneCutMask)
+            restanteMask = np.zeros_like(boneCutMask)
+            UMBRAL_RUIDO_VOXELES = 30
+            porMadre = {}
+            for lab in range(1, nHijas + 1):
+                m = (labeledCut == lab)
+                vox = int(np.count_nonzero(m))
+                if vox < UMBRAL_RUIDO_VOXELES:
+                    restanteMask = np.logical_or(restanteMask, m)  # ruido -> restante
+                    continue
+                etiquetas = labeledAntes[m]
+                etiquetas = etiquetas[etiquetas > 0]
+                madre = int(np.bincount(etiquetas).argmax()) if etiquetas.size else 0
+                porMadre.setdefault(madre, []).append((vox, m))
 
-        if not piezasValidas:
-            print("CranioPlan DIAGNÓSTICO: ninguna pieza superó el volumen mínimo.")
-            slicer.mrmlScene.RemoveNode(segCorte)
-            return []
+            print("CranioPlan DIAGNÓSTICO: resultado del corte por pieza madre:")
+            for madre in sorted(porMadre.keys()):
+                piezas = sorted(porMadre[madre], key=lambda x: x[0], reverse=True)
+                reales = [(v, m) for (v, m) in piezas
+                          if v * volumenVoxelMM3 >= volumenMinimoFragmentoMM3]
+                esquirlas = [(v, m) for (v, m) in piezas
+                             if v * volumenVoxelMM3 < volumenMinimoFragmentoMM3]
+                if len(reales) <= 1:
+                    for (v, m) in piezas:
+                        restanteMask = np.logical_or(restanteMask, m)
+                    detalle = ", ".join(f"{v * volumenVoxelMM3 / 1000.0:.2f}" for (v, m) in piezas)
+                    print(f"    madre {madre}: NO separada ({len(reales)} real; {detalle} cm3) -> restante.")
+                else:
+                    restanteMask = np.logical_or(restanteMask, reales[0][1])
+                    for (v, m) in reales[1:]:
+                        flapMasks.append(m)
+                    for (v, m) in esquirlas:
+                        restanteMask = np.logical_or(restanteMask, m)
+                    vols = ", ".join(f"{v * volumenVoxelMM3 / 1000.0:.2f}" for (v, m) in reales)
+                    print(
+                        f"    madre {madre}: SEPARADA en {len(reales)} reales ({vols} cm3). "
+                        f"Mayor al restante; {len(reales) - 1} extraída(s)."
+                    )
 
-        # --- Exportar cada fragmento a su propio modelo 3D ---
-        segCorte.CreateClosedSurfaceRepresentation()
+        # === PASO 4: exportar cada máscara (restante y flaps) a un modelo ===
+        def _mascaraAModelo(mascara, nombre, color):
+            if mascara is None or not mascara.any():
+                return None
+            segTmp = slicer.mrmlScene.AddNewNodeByClass(
+                'vtkMRMLSegmentationNode', 'CranioPlan_tmp_export'
+            )
+            segTmp.CreateDefaultDisplayNodes()
+            segTmp.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+            sid = segTmp.GetSegmentation().AddEmptySegment("m")
+            slicer.util.updateSegmentBinaryLabelmapFromArray(
+                mascara.astype(np.uint8), segTmp, sid, volumeNode
+            )
+            segTmp.CreateClosedSurfaceRepresentation()
+            pd = vtk.vtkPolyData()
+            segTmp.GetClosedSurfaceRepresentation(sid, pd)
+            ok = pd.GetNumberOfPoints() > 0
+            pdcopy = vtk.vtkPolyData()
+            if ok:
+                pdcopy.DeepCopy(pd)
+            slicer.mrmlScene.RemoveNode(segTmp)
+            if not ok:
+                return None
+            pdcopy = self._decimarMalla(pdcopy, reduccionMallaFragmentos)
+            return self.crearModeloDesdePolyData(pdcopy, nombre, color)
 
-        # El fragmento MÁS GRANDE conserva el color natural del hueso;
-        # los fragmentos extraídos (más chicos) se resaltan con colores
-        # distintos, para que se vea de un vistazo qué se cortó.
-        COLOR_HUESO = (0.9, 0.8, 0.6)
+        slicer.mrmlScene.RemoveNode(segCorte)
+
+        restanteModel = _mascaraAModelo(restanteMask, "Craneo_restante", (0.9, 0.8, 0.6))
+        if restanteModel is None:
+            print("CranioPlan DIAGNÓSTICO: el cráneo restante quedó vacío tras el corte.")
+            return None
+
         COLORES_EXTRAIDOS = [
             (0.55, 0.75, 0.85),  # celeste
             (0.75, 0.85, 0.55),  # verde claro
             (0.85, 0.55, 0.75),  # rosado
             (0.95, 0.75, 0.45),  # naranja suave
         ]
+        fragmentosExtraidos = []
+        for k, fmask in enumerate(flapMasks):
+            indice = indiceInicialFragmento + k
+            nombre = f"Fragmento_extraido_{indice}"
+            color = COLORES_EXTRAIDOS[(indice - 1) % len(COLORES_EXTRAIDOS)]
+            modelo = _mascaraAModelo(fmask, nombre, color)
+            if modelo is not None:
+                fragmentosExtraidos.append(modelo)
+                print(f"CranioPlan: {modelo.GetName()} creado.")
 
-        fragmentos = []
-        for idx, (volumenMM3, voxeles, segId) in enumerate(piezasValidas):
-            polyDataFragmento = vtk.vtkPolyData()
-            segCorte.GetClosedSurfaceRepresentation(segId, polyDataFragmento)
-            if polyDataFragmento.GetNumberOfPoints() == 0:
-                continue
+        print(
+            f"CranioPlan: corte terminado. {len(fragmentosExtraidos)} fragmento(s) "
+            "extraído(s) por este corte."
+        )
+        print("=" * 60)
 
-            copia = vtk.vtkPolyData()
-            copia.DeepCopy(polyDataFragmento)
-
-            # Los fragmentos salen de la segmentación a resolución completa
-            # (marching cubes). Sin decimarlos, cada corte vuelve a llenar
-            # la escena de mallas pesadas y el lag reaparece.
-            copia = self._decimarMalla(copia, reduccionMallaFragmentos)
-
-            if idx == 0:
-                nombre = "Craneo_restante"
-                color = COLOR_HUESO
-            else:
-                nombre = f"Fragmento_extraido_{idx}"
-                color = COLORES_EXTRAIDOS[(idx - 1) % len(COLORES_EXTRAIDOS)]
-
-            nombreUnico = slicer.mrmlScene.GenerateUniqueName(nombre)
-            nodo = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLModelNode', nombreUnico)
-            nodo.SetAndObservePolyData(copia)
-            nodo.CreateDefaultDisplayNodes()
-            nodo.GetDisplayNode().SetColor(*color)
-            nodo.GetDisplayNode().SetScalarVisibility(False)
-            fragmentos.append(nodo)
-
-            print(
-                f"CranioPlan: {nombreUnico} — {volumenMM3 / 1000.0:.2f} cm3, "
-                f"{copia.GetNumberOfCells()} triángulos."
-            )
-
-        slicer.mrmlScene.RemoveNode(segCorte)
-
-        print(f"CranioPlan DIAGNÓSTICO: quedaron {len(fragmentos)} fragmento(s) óseo(s).")
-        return fragmentos
+        return {
+            "restante": restanteModel,
+            "fragmentos": fragmentosExtraidos,
+            "piezasCreadas": len(fragmentosExtraidos),
+            "piezasAntes": nMadres,
+        }
 
 
 #
