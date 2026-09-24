@@ -1,0 +1,221 @@
+============================================================
+CRANIOPLAN - INSTALACION Y PUESTA EN MARCHA
+Version 2026-09-24 (reorganizacion del repo; modulo: Bloque A v7.2 +
+Corte v16 + Bloque G v1)
+============================================================
+
+IMPORTANTE - RUTA EN SLICER (leer esto primero, aplica a Valentino y a Nacho)
+------------------------------------------------------------
+Este repositorio se reorganizo el 2026-09-24. La carpeta del modulo YA NO
+es la raiz del repo: ahora es la subcarpeta CranioPlan/.
+
+En Slicer, Edit > Application Settings > Modules > "Additional module
+paths" tiene que apuntar a:
+
+    <...>\TESIS\CranioPlan          <- CORRECTO (la subcarpeta del repo)
+
+y NO a:
+
+    <...>\TESIS                     <- INCORRECTO (la raiz del repo)
+
+Si la ruta configurada apunta a la raiz del repo, o a una copia vieja
+(por ejemplo C:\Users\...\OneDrive\Escritorio\CranioPlan), sacala y
+dejar solo la de CranioPlan\ dentro de este repo. Dos rutas con dos
+CranioPlan.py distintos es como se llega a editar un archivo y ver los
+cambios en ninguna parte.
+
+
+1. QUE ARCHIVOS SON Y DONDE VAN
+------------------------------------------------------------
+La estructura del repositorio completo es esta:
+
+    TESIS/                            <- raiz del repo
+    |
+    +-- CranioPlan/                   <- ESTA ruta (no la raiz) va en Slicer
+    |   +-- CranioPlan.py             el modulo (interfaz + orquestacion)
+    |   +-- CranioPlanLib/            la libreria de algoritmos
+    |   |   +-- __init__.py
+    |   |   +-- Comun.py              nombres de nodos compartidos
+    |   |   +-- BloqueC.py            elegir y cargar la serie DICOM (v2.1)
+    |   |   +-- BloqueA.py            preparar el craneo (v7.2)
+    |   |   +-- BloqueF.py            cortar (v16)
+    |   |   +-- BloqueG.py            reacomodar las piezas (v1)
+    |   +-- Resources/                icono del modulo
+    |   +-- Testing/                  esqueleto de tests
+    |   +-- CMakeLists.txt            para empaquetar como extension
+    |
+    +-- desarrollo/
+    |   +-- nacho/                    scripts de consola vigentes de Nacho
+    |   +-- valentino/                scripts de consola vigentes de Valentino
+    |
+    +-- archivo/                      versiones viejas ya reemplazadas (se
+    |                                 conservan para el capitulo de tesis
+    |                                 que justifica cada bloque, no se borran)
+    |
+    +-- CLAUDE.md, CHANGELOG.txt, LEEME.txt (este archivo), .gitignore
+
+DOS COSAS QUE NO SE PUEDEN CAMBIAR:
+
+  - La carpeta se tiene que llamar CranioPlan y el archivo CranioPlan.py.
+    Slicer busca un archivo con el mismo nombre que la carpeta y adentro una
+    clase con ese mismo nombre. Si alguno de los tres no coincide, el modulo
+    no aparece en la lista y no da ningun error visible.
+
+  - CranioPlanLib va ADENTRO de la carpeta CranioPlan, no al lado.
+
+Ademas: Slicer escanea la carpeta configurada Y TODAS SUS SUBCARPETAS
+buscando .py que definan un modulo. Por eso adentro de CranioPlan/ va SOLO
+lo que hace falta para que el modulo corra: nada de versiones viejas ni
+scripts de consola sueltos (esos viven en desarrollo/ y archivo/, fuera de
+CranioPlan/, donde Slicer no los mira). Un .py viejo olvidado ahi adentro
+no es inocente: si define una clase de modulo, Slicer lo carga y aparece un
+modulo fantasma; si tiene un error, ensucia el Error Log y cuesta encontrar
+el error de verdad.
+
+
+2. SI EL MODULO NO APARECE EN SLICER
+------------------------------------------------------------
+Revisar en este orden. Son las causas por las que un modulo "desaparece",
+de la mas frecuente a la menos:
+
+  (a) LA RUTA SE PERDIO O APUNTA A OTRA COPIA.
+      Edit > Application Settings > Modules > "Additional module paths".
+      Ahi tiene que estar CranioPlan\ DENTRO de este repo (ver la seccion
+      IMPORTANTE mas arriba), con su ruta completa. No la raiz del repo,
+      no OneDrive\Escritorio\CranioPlan, no C:\Users\valen\Craneoplan (esa
+      carpeta no tiene el modulo, esta vacia de subcarpetas, y el nombre
+      parecido se presta a confusion).
+      Si hay ademas una ruta vieja apuntando a otra copia del modulo, sacala:
+      dos rutas con dos CranioPlan.py distintos es como se llega a editar un
+      archivo y ver los cambios en ninguna parte.
+
+  (b) EL ARCHIVO ESTA EN ONEDRIVE Y NO ESTA DESCARGADO.
+      OneDrive libera espacio dejando los archivos "solo en la nube": el
+      archivo se ve en el explorador pero no existe en el disco, y Slicer no
+      lo puede leer. Click derecho sobre la carpeta CranioPlan >
+      "Conservar siempre en este dispositivo". Es la causa mas comun cuando
+      el modulo funcionaba y de un dia para el otro no aparece mas.
+
+  (c) HAY UN ERROR DE SINTAXIS EN EL ARCHIVO.
+      Si el archivo no compila, Slicer lo saltea en silencio y el modulo no
+      figura. Se ve en Help > Error Log (o View > Error Log), buscando
+      "CranioPlan". Un error de indentacion al pegar codigo entra por aca.
+
+  (d) EL MODULO QUEDO EN LA LISTA DE IGNORADOS.
+      Application Settings > Modules > "Modules to ignore". Si dice
+      CranioPlan, sacarlo de ahi.
+
+  (e) LA CARPETA SE MOVIO O SE RENOMBRO.
+      Verificar que la ruta configurada en (a) siga existiendo tal cual.
+
+Truco para saber si Slicer lo esta leyendo: al cargarse imprime en la consola
+de Python
+
+    CranioPlan 2026-08-21 - ...: modulo cargado.
+
+Si eso no aparece, el problema es de instalacion (a-e), no del codigo.
+
+
+3. COMO SE USA
+------------------------------------------------------------
+El modulo esta en la categoria "Craneofacial". Los pasos se habilitan solos a
+medida que se completa el anterior:
+
+  Paso 1  Elegir la carpeta del paciente, o el .zip tal cual vino del portal.
+          El sistema mira todas las series y propone la mas apta. La lista
+          queda a la vista por si hay que cambiarla, y avisa cuando hay dos
+          series iguales y no puede decidir solo.
+
+  Paso 2  Generar el craneo 3D y revisar las piezas. Verde = seguro,
+          naranja = dudoso. Quitar lo que no sea craneo y confirmar.
+
+  Paso 3  Trazar las lineas de corte sobre el modelo 3D. Conviene
+          previsualizar antes: azul = el corte atraviesa el hueso,
+          rojo = se queda adentro y ahi no va a separar.
+
+  Paso 4  Reacomodar las piezas. La base queda fija; el resto se mueve con el
+          mouse o con valores exactos. El molde muestra la forma objetivo.
+
+  Paso 5  Exportar los STL.
+
+Al pie de todo hay un panel "Detalle tecnico" con todo lo que fue haciendo el
+sistema, numeros incluidos. Es lo que hay que copiar si algo sale raro.
+
+
+4. PARA SEGUIR DESARROLLANDO
+------------------------------------------------------------
+Cada bloque de CranioPlanLib/ sigue siendo pegable tal cual en la consola de
+Python de Slicer. Por eso el Bloque F conservo sus constantes de configuracion
+como variables de modulo en vez de pasarlas a una clase: se puede abrir
+BloqueF.py, cambiar un umbral, pegarlo en la consola y probar sin abrir el
+modulo.
+
+El boton "Reload" del modulo recarga tambien la libreria (CranioPlanLib.
+recargar() se llama en cada setup). Sin eso, tocar BloqueF.py y apretar Reload
+dejaba corriendo el codigo viejo.
+
+Division de trabajo sugerida:
+  - CranioPlan.py           -> interfaz (Valentino)
+  - CranioPlanLib/BloqueF.py-> corte (Nacho)
+  - CranioPlanLib/BloqueA.py-> preparacion del craneo
+Cada uno en su archivo, sin conflictos al mergear.
+
+IMPORTANTE: los scripts de consola en desarrollo/nacho/ y
+desarrollo/valentino/ estan MAS ADELANTADOS que sus equivalentes en
+CranioPlanLib/ (corte_V17 respecto de BloqueF.py, Bloque_G_V1.1.py respecto
+de BloqueG.py, Bloque_A_V7.2_a.py respecto de BloqueA.py). Esa integracion
+todavia no se hizo: ver CHANGELOG.txt, seccion PENDIENTES.
+
+
+5. QUE CAMBIO RESPECTO DE LA VERSION ANTERIOR DEL MODULO (2026-08-21)
+------------------------------------------------------------
+Partiendo del CranioPlan.py v7.1 (2026-08-05):
+
+  SE CONSERVA, sacado a CranioPlanLib\BloqueC.py
+    - Todo el Bloque C v2: kernel de reconstruccion, ImageType,
+      ImageOrientationPatient, espaciado real por ImagePositionPatient,
+      recorrido recursivo de todos los estudios y series. Esta validado
+      contra 6 estudios reales y NO se toco.
+    - La carga desde .zip del portal.
+    - El desplegable del Paso 1 con el ranking completo de series.
+
+  SE AGREGA al Bloque C (v2.1)
+    - El cerebro es un escalon propio en el orden: hueso, despues cerebro,
+      despues cualquier otra volumetrica.
+    - Se detecta el empate: si las dos primeras series se llaman igual y
+      tienen casi la misma cantidad de cortes, el sistema lo dice y pide que
+      elijas, en vez de tirar una moneda.
+    - El panel "Ver todas las series" ahora muestra tambien las descartadas
+      con el motivo, sin tener que ir a la consola de Python.
+
+  SE REEMPLAZA
+    - Bloque A v6  ->  v7.2, calibrado sobre 206 islas de 9 series reales.
+    - Bloque F v10 ->  v16: direccion siempre perpendicular al hueso y
+      verificacion rayo por rayo de si atraviesa. Solo curvas abiertas.
+
+  SE AGREGA
+    - Paso 4 completo: reacomodamiento de las piezas (Bloque G v1).
+    - Paso 5: exportacion a STL.
+    - Panel "Detalle tecnico" con todo el log de los bloques.
+
+  CAMBIA DE LUGAR
+    - Los algoritmos salieron del archivo del modulo y viven en
+      CranioPlanLib\, un archivo por bloque.
+
+
+6. REORGANIZACION DEL REPO (2026-09-24)
+------------------------------------------------------------
+El repo tenia 25 scripts de consola sueltos en la raiz mezclados con el
+modulo, y el trabajo de refactorizacion a CranioPlanLib/ (hecho a partir de
+un respaldo local) nunca habia llegado a GitHub. Se reorganizo todo a la
+estructura de la seccion 1: el modulo empaquetable a CranioPlan/, los
+scripts de consola vigentes de cada uno a desarrollo/nacho y
+desarrollo/valentino, y las versiones viejas ya reemplazadas a archivo/
+(se conservan, no se borran: son material para el capitulo de tesis que
+justifica cada version).
+
+De paso se saco del indice de git un gitlink roto llamado TESIS (un error
+de git de sesiones anteriores, sin contenido real asociado) y el
+__pycache__ que estaba commiteado por error.
+
+Detalle completo y pendientes de integracion: ver CHANGELOG.txt.

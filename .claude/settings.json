@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(**/datos_dicom/**)",
+      "Read(**/*.dcm)",
+      "Read(**/*.DCM)",
+      "Read(**/*.nrrd)",
+      "Read(**/*.nii)",
+      "Read(**/*.nii.gz)",
+      "Read(**/*.mrb)",
+      "Read(**/*_diag_islas_*.csv)",
+      "Read(**/Registro_casos_*.xlsx)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push origin +*)",
+      "Bash(git reset --hard:*)"
+    ]
+  }
+}

@@ -1,0 +1,52 @@
+============================================================
+CRANIOPLAN - CHANGELOG
+============================================================
+
+2026-09-24 - Reorganizacion del repositorio
+------------------------------------------------------------
+El repo tenia 25 scripts de consola sueltos en la raiz mezclados con el
+modulo de Slicer, y la refactorizacion del modulo a paquete
+(CranioPlanLib/) -- hecha sobre un respaldo local, nunca habia llegado a
+GitHub. Se reorganizo la estructura completa:
+
+  - CranioPlan/            modulo de Slicer (CranioPlan.py, CranioPlanLib/,
+                            Resources/, Testing/, CMakeLists.txt), traido
+                            desde el respaldo local en un commit separado
+                            del resto de la reorganizacion.
+  - desarrollo/nacho/       scripts de consola vigentes de Nacho.
+  - desarrollo/valentino/   scripts de consola vigentes de Valentino.
+  - archivo/                versiones viejas ya reemplazadas (se conservan,
+                            no se borran: son material para el capitulo de
+                            tesis que justifica cada version).
+
+Se agrego .gitignore (excluye __pycache__/, *.pyc, datos DICOM/NRRD/NIfTI/
+MRB, CSVs y planillas de casos, .vscode/, desktop.ini, Thumbs.db, *.bak).
+
+Se saco del indice de git:
+  - El gitlink roto "TESIS" (apuntaba al commit 9145b27, que resulto ser un
+    commit real de la propia historia del repo -- un error de sesiones
+    anteriores, sin contenido real asociado; no tenia .gitmodules).
+  - __pycache__/CranioPlan.cpython-312.pyc, commiteado por error.
+
+Se agrego CLAUDE.md y .claude/settings.json con las reglas de trabajo del
+proyecto.
+
+Ver LEEME.txt seccion "IMPORTANTE" para el cambio de ruta que hay que
+hacer en Slicer (Edit > Application Settings > Modules > Additional module
+paths debe apuntar a la subcarpeta CranioPlan/, no a la raiz del repo).
+
+PENDIENTES (no se integran en este cambio, quedan para un PR aparte):
+  - Portar a CranioPlanLib/BloqueF.py las mejoras de
+    desarrollo/nacho/corte_V17.py: correccion del bug de extension de
+    puntas en uniones (huecos de 2-4mm en la v16 actual del modulo) y la
+    busqueda de camino mas corto por Viterbi.
+  - Portar a CranioPlanLib/BloqueG.py las mejoras de
+    desarrollo/valentino/Bloque_G_V1.1.py: movilidad de piezas por
+    distancia geometrica a las curvas de corte, indice craneal acotado a
+    la boveda, y la funcion huecos(). Sin perder la arquitectura de clase
+    que tiene BloqueG.py y que el script de consola no adopto.
+  - Portar a CranioPlanLib/BloqueA.py las mejoras de
+    desarrollo/valentino/Bloque_A_V7.2_a.py: centrar_vista() (encuadre
+    automatico de la vista 3D/2D) y los campos de diagnostico
+    (etiqueta_real, nota_real) usados en Bloque_A_V7.2_a_Diagnostico.py
+    para el relevamiento.
