@@ -858,14 +858,13 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             d = c.GetDisplayNode()
             if d is None:
                 continue
+            # se resalta solo con color: el grosor queda el de Slicer
             if c is curva:
                 d.SetSelectedColor(1.0, 1.0, 0.0)
                 d.SetColor(1.0, 1.0, 0.0)
-                d.SetLineThickness(1.0)
             else:
                 d.SetSelectedColor(1.0, 0.2, 0.2)
                 d.SetColor(1.0, 0.4, 0.4)
-                d.SetLineThickness(0.5)
 
     def onBorrarLinea(self, curva):
         nombre = curva.GetName()
@@ -1566,10 +1565,11 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
         curva.CreateDefaultDisplayNodes()
         d = curva.GetDisplayNode()
         if d is not None:
+            # Tamano de puntos y grosor de linea: los de Slicer por defecto
+            # (no se tocan), igual que al trazar desde la consola. Antes se
+            # forzaban mas grandes y la linea se veia como un tubo grueso.
             d.SetSelectedColor(1.0, 0.2, 0.2)
             d.SetColor(1.0, 0.4, 0.4)
-            d.SetGlyphScale(2.5)
-            d.SetLineThickness(0.5)
             d.SetPropertiesLabelVisibility(False)
             d.SetPointLabelsVisibility(False)
         return curva

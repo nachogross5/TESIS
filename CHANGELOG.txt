@@ -2,6 +2,16 @@
 CRANIOPLAN - CHANGELOG
 ============================================================
 
+2026-09-24 - Paso 3: trazado de corte con aspecto de Markups por defecto
+------------------------------------------------------------
+En el modulo la linea de corte se veia como un tubo rojo grueso con puntos
+grandes (en la consola se ve fina). La causa era CranioPlan.py:
+nuevaCurvaDeCorte forzaba SetGlyphScale(2.5) y SetLineThickness(0.5), y
+onVerLinea engrosaba la linea elegida (1.0). Nada que ver con el ancho de
+sierra ni con el Bloque F. Ahora la curva usa los valores por defecto de
+Slicer y "Ver" resalta la linea solo con color (amarillo); las demas
+vuelven al rojo.
+
 2026-09-24 - Bloque F v16 -> v17 (integra desarrollo/nacho/corte_V17.py)
 ------------------------------------------------------------
 CranioPlanLib/BloqueF.py pasa a v17. El algoritmo es el del script de
