@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+datos_dicom/
+*.dcm
+*.nrrd
+*.nii
+*.nii.gz
+*.mrb
+*_diag_islas_*.csv
+Registro_casos_*.xlsx
+.vscode/
+desktop.ini
+Thumbs.db
+*.bak
