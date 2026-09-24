@@ -1,44 +1,65 @@
 # -*- coding: utf-8 -*-
 # ============================================================
-# CRANIOPLAN - BLOQUE F v16  (version libreria, para el modulo)
+# CRANIOPLAN - BLOQUE F v17  (version libreria, para el modulo)
 #              CORTE / OSTEOTOMIAS
 # ============================================================
-# Es el script BloqueF_v16.py convertido en libreria. El algoritmo NO se toco:
-# mismas funciones, mismos umbrales, mismo pipeline. Los unicos cambios son de
-# envoltorio:
+# Es el script desarrollo/nacho/corte_V17.py convertido en libreria. El
+# algoritmo NO se toco: mismas funciones, mismos umbrales, mismo pipeline. Los
+# unicos cambios son de envoltorio:
 #
 #   - print() -> _p(), que escribe en la consola de Python Y en la interfaz;
 #   - diagnosticar() y cortar() ademas de imprimir DEVUELVEN un diccionario
 #     con los numeros, para que el widget pueda mostrar un resumen en vez de
 #     obligar al medico a leer la consola;
 #   - las constantes de configuracion se pueden cambiar con configurar(), que
-#     es como el modulo aplica el grosor de sierra que elige el cirujano.
+#     es como el modulo aplica el grosor de sierra que elige el cirujano;
+#   - el reporte de las puntas, que en el script esta repetido en
+#     diagnosticar() y en el reporte de cortar(), esta en _reportar_puntas().
 #
 # ############################################################
-# CAMBIO DE FILOSOFIA DE v16 (respecto de v14/v15)
+# v17: VUELVE LA BUSQUEDA DEL CAMINO MAS CORTO, PERO COHERENTE
 # ############################################################
 #
-# SE ELIMINO la busqueda automatica de direccion de v14/v15. Era la que
-# producia los "tajos random": cuando elegia mal el angulo, barria hasta 25mm
-# en una direccion equivocada y dejaba un corte donde no correspondia. Un
-# algoritmo que a veces acierta espectacularmente y a veces arruina la pieza no
-# sirve para planificar una cirugia.
+# v14/v15 buscaban, en un abanico de direcciones, cual atravesaba el hueso por
+# el camino mas corto. La idea es correcta (en la ceja, cortar hacia arriba por
+# encima del techo orbitario es mucho mas corto que arrastrarse a lo largo de
+# la placa), pero CADA PUNTO ELEGIA SU ANGULO POR SU CUENTA: dos vecinos podian
+# caer en minimos opuestos (+40 y -40 grados) y eso es un tajo abriendose en
+# abanico. v16 elimino la busqueda y corto siempre perpendicular.
 #
-# v16 hace MENOS pero lo hace SIEMPRE IGUAL:
+# [C1] La eleccion ahora es de la CURVA ENTERA: se busca la secuencia de
+#      angulos (en el plano perpendicular a la curva) que minimiza el recorrido
+#      total, con la restriccion dura de no girar mas de MAX_GIRO_POR_PASO_DEG
+#      entre puntos consecutivos. Se resuelve exacto con programacion dinamica
+#      (Viterbi). El tajo random no puede ocurrir por construccion.
+# [C2] Uniones que cierran: v16 NO extendia una punta que quedaba cerca de otra
+#      curva, y si las puntas quedaban a 0.5-4mm ese puente de hueso jamas se
+#      cortaba. Ahora la punta se extiende EXACTAMENTE hasta tocar la otra
+#      curva, mas SOLAPE_UNION_MM.
+# [C3] Se reporta la TIRADA CONTINUA MAS LARGA sin atravesar, en mm. Es lo que
+#      decide la separacion: un solo puente continuo sostiene toda la pieza,
+#      aunque el porcentaje que atraviesa sea alto.
 #
-#   1. Corta SIEMPRE PERPENDICULAR a la superficie donde se dibujo la curva.
-#      Predecible, sin sorpresas, sin tajos en diagonal.
+# Se conserva de v16 la verificacion rayo por rayo, el tope en seco para los
+# rayos que no atraviesan, la salida por espacio abierto 3D + margen, el kerf,
+# el supersampleo de continuidad y la verificacion de separacion por curva.
 #
-#   2. VERIFICA, rayo por rayo, si ese corte logro ATRAVESAR el hueso, y lo
-#      muestra. Donde no pudo, NO improvisa: se detiene, lo marca, y avisa.
-#
-# La zona retro-orbitaria probablemente siga sin separarse, porque ahi la
-# perpendicular a la superficie externa corre a lo largo de la placa y eso es
-# geometria, no un bug. La diferencia es que ahora se VE en que puntos no
-# atraviesa, antes de cortar. La solucion en esa zona es quirurgica, no
-# algoritmica: una segunda curva dibujada sobre la cara por la que si se puede
-# entrar. Es, de hecho, lo que hace el cirujano: la osteotomia del techo
-# orbitario es un corte aparte.
+# ############################################################
+# CASOS CONOCIDOS EN QUE FALLA
+# (identificados por revision de codigo, no observados todavia en casos reales)
+# ############################################################
+#   - Lazos cerrados: Viterbi no restringe el giro entre el ULTIMO y el PRIMER
+#     punto. La costura se pone donde la eleccion es menos ambigua, pero ahi
+#     puede haber un salto de direccion (reproducido con costos sinteticos:
+#     18.75 grados). La interfaz solo ofrece lineas abiertas.
+#   - Uniones: la extension sigue la tangente de la punta. Si la otra curva
+#     queda de costado y no de frente, extender "distancia + solape" puede no
+#     tocarla y quedar un hueco. El reporte no lo avisa, porque la distancia
+#     estaba dentro de UNION_TOLERANCIA_MM y se la da por cerrada.
+#   - Dos curvas que NO debian unirse pero pasan a menos de
+#     UNION_TOLERANCIA_MM (6mm) se unen igual: espolon de hasta 7mm.
+#   - La previsualizacion tarda mas que en v16: N_ANGULOS_BUSQUEDA (25)
+#     barridos extra por curva.
 #
 # ############################################################
 # [V1] LA VERIFICACION POR RAYO
@@ -78,7 +99,7 @@
 # v13: filtro angular del vecindario de normales (solo entran vertices de la
 #      MISMA cara: ni la tabla interna, ni los poros, ni la placa vecina),
 #      guarda anti-contaminacion en la propagacion de signos, ventana de
-#      suavizado en mm, no extender puntas que se unen a otra curva.
+#      suavizado en mm.
 # v15: verificacion de separacion curva por curva.
 # ============================================================
 
@@ -100,7 +121,7 @@ from .Comun import (NOMBRE_MODELO_CRANEO, NOMBRE_NODO_SEGMENTACION,
 NOMBRE_SEGMENTACION   = NOMBRE_NODO_SEGMENTACION
 NOMBRE_SEGMENTO_HUESO = NOMBRE_SEGMENTO_CRANEO
 
-BLOQUE_F_VERSION = "v16 (direccion siempre perpendicular + verificacion por rayo)"
+BLOQUE_F_VERSION = "v17 (camino mas corto coherente + uniones que cierran)"
 
 # ==================== CONFIGURACION ====================
 # --- Geometria del corte ---
@@ -139,6 +160,30 @@ TOPE_SIN_SALIDA_MIN_MM = 6.0    # piso, para curvas sobre hueso muy fino.
 AVISO_SI_NO_ATRAVIESA  = 0.02   # avisar si mas del 2% de los puntos de una
 #   curva no atraviesa.
 
+# --- [C1] BUSQUEDA DEL CAMINO MAS CORTO (coherente por programacion dinamica) ---
+BUSCAR_CAMINO_MAS_CORTO = True  # False = cortar siempre perpendicular (v16)
+ANGULO_BUSQUEDA_MAX    = 45.0   # cuanto puede ladearse el corte respecto de la
+#   perpendicular, EN EL PLANO PERPENDICULAR A LA CURVA (la unica libertad es
+#   inclinarse hacia un lado u otro en la seccion transversal de la placa, que
+#   es el mismo grado de libertad que tiene la sierra en la mano).
+N_ANGULOS_BUSQUEDA     = 25     # resolucion: con +-45 y 25 angulos, 3.75 grados
+MAX_GIRO_POR_PASO_DEG  = 4.0    # <<< EL PARAMETRO QUE MATA LOS TAJOS RANDOM.
+#   Giro maximo del corte de un punto de la curva al siguiente (~0.37mm). Con
+#   4 grados por paso la direccion puede recorrer todo el rango a lo largo de
+#   la curva, pero NO puede pegar un salto. Bajarlo a 2 = cortes mas rigidos y
+#   seguros; subirlo a 8-10 = mas libertad y mas riesgo de abanico.
+PESO_REGULARIZACION    = 0.35   # entre dos direcciones de recorrido parecido
+#   gana la mas perpendicular. Subir = mas conservador.
+PESO_SUAVIDAD          = 0.05   # costo (mm) por cada grado de giro. Ademas del
+#   limite duro, penaliza girar sin necesidad.
+ESPESOR_MIN_VALIDO     = 1.0    # una direccion que "atraviesa" menos que esto
+#   esta pasando de refilon por el borde, no cruzando la placa.
+PENAL_SIN_SALIDA_MM    = 60.0   # costo de un punto donde ninguna direccion
+#   atraviesa. Alto pero FINITO: la secuencia puede pasar por ahi sin romperse.
+PASO_BUSQUEDA_VOXELES  = 1.0    # la busqueda usa paso grueso (el corte final
+#   sigue usando medio voxel).
+BLOQUE_BUSQUEDA        = 512
+
 # --- [B2] Continuidad de la cortina ---
 OBJETIVO_CONTINUIDAD   = 0.5    # separacion maxima entre rayos vecinos, en
 #   voxeles, a CUALQUIER profundidad. Con 0.5 la cortina no puede perforarse.
@@ -150,8 +195,13 @@ FACTOR_PASO_BARRIDO    = 0.5
 DIST_MUESTREO_MM       = 0.0    # 0 = derivar del spacing
 
 # --- Uniones y extensiones de puntas ---
-EXTENSION_EXTREMOS_MM  = 3.0
-UNION_TOLERANCIA_MM    = 4.0
+EXTENSION_EXTREMOS_MM  = 3.0    # extension de una punta LIBRE (que no toca
+#   ninguna otra curva).
+UNION_TOLERANCIA_MM    = 6.0    # [C2] si la punta esta a menos de esto de otra
+#   curva, se considera que ahi va una UNION y se extiende EXACTAMENTE hasta
+#   tocarla (no se suprime la extension, que es lo que dejaba el hueco).
+SOLAPE_UNION_MM        = 1.0    # [C2] cuanto se pasa de largo en la union para
+#   garantizar que cierre. Chico a proposito: es un solape, no un espolon.
 PROYECTAR_EXTENSION    = True
 
 # --- Verificacion ---
@@ -432,18 +482,29 @@ def _quitar_coincidentes(posiciones, esCerrada, toleranciaMM=0.2):
     return limpias
 
 
-def _extender_extremos(posiciones, distanciaMM, pasoMM,
-                       extenderIni, extenderFin, campo):
-    """Prolonga solo las puntas LIBRES, proyectando sobre la superficie. Las
-    puntas que tocan otra curva (uniones) no se extienden: eso dibujaba
-    espolones que sobrepasaban las esquinas al encadenar lineas."""
-    if len(posiciones) < 2 or distanciaMM <= 0:
+def _extender_extremos(posiciones, largoIni, largoFin, pasoMM, campo):
+    """
+    [C2] Prolonga cada punta el largo que le corresponde, proyectando sobre la
+    superficie para que la extension SIGA el hueso en vez de volar por la
+    tangente.
+
+    El largo ya viene calculado por _largo_extension_puntas(): para una punta
+    LIBRE es EXTENSION_EXTREMOS_MM; para una punta que va a UNIRSE con otra
+    curva es exactamente la distancia que falta para tocarla, mas un solape
+    chico.
+
+    v16 hacia otra cosa y estaba mal: cuando detectaba una union NO extendia
+    nada, dando por sentado que las curvas ya se tocaban. Si quedaban a 2mm,
+    esos 2mm de hueso jamas se cortaban, y en un craneo cerrado un solo puente
+    de 2mm en una sien deja el colgajo colgado y no se separa nada.
+    """
+    if len(posiciones) < 2:
         return list(posiciones), np.zeros(len(posiciones), dtype=bool)
 
-    def _muestras(desde, direccion):
+    def _muestras(desde, direccion, largo):
         out = []
         t = pasoMM
-        while t <= distanciaMM + 1e-9:
+        while t <= largo + 1e-9:
             p = desde + direccion * t
             if PROYECTAR_EXTENSION and campo is not None:
                 p = campo.proyectar(p)
@@ -452,17 +513,17 @@ def _extender_extremos(posiciones, distanciaMM, pasoMM,
         return out
 
     extIni, extFin = [], []
-    if extenderIni:
+    if largoIni > 0:
         d = posiciones[0] - posiciones[1]
         nd = np.linalg.norm(d)
         if nd > 1e-9:
-            extIni = _muestras(posiciones[0], d / nd)
+            extIni = _muestras(posiciones[0], d / nd, largoIni)
             extIni.reverse()
-    if extenderFin:
+    if largoFin > 0:
         d = posiciones[-1] - posiciones[-2]
         nd = np.linalg.norm(d)
         if nd > 1e-9:
-            extFin = _muestras(posiciones[-1], d / nd)
+            extFin = _muestras(posiciones[-1], d / nd, largoFin)
 
     todas = extIni + list(posiciones) + extFin
     esExt = np.zeros(len(todas), dtype=bool)
@@ -480,20 +541,79 @@ def _puntos_de_curva(curvaNode):
     return vtk_to_numpy(p.GetData()).astype(float)
 
 
-def _puntas_libres(curvaNode, otrasCurvas, tolMM):
+def _largo_extension_puntas(curvaNode, otrasCurvas):
+    """
+    [C2] Cuanto hay que prolongar cada punta.
+
+      - punta LIBRE (lejos de toda otra curva): EXTENSION_EXTREMOS_MM, para
+        asegurar que llegue al borde del hueso.
+      - punta que va a UNIRSE con otra curva (a menos de UNION_TOLERANCIA_MM):
+        exactamente la distancia que falta para tocarla, mas SOLAPE_UNION_MM.
+        Ni menos (quedaria un puente de hueso sin cortar en la union, y con eso
+        no se separa nada) ni de mas (seria un espolon pasandose de la esquina).
+
+    Devuelve (largoIni, largoFin, distIni, distFin) en mm; las distancias son
+    para el reporte.
+    """
     pts = _puntos_de_curva(curvaNode)
     if pts.shape[0] < 2:
-        return True, True
+        return 0.0, 0.0, np.inf, np.inf
     otros = [_puntos_de_curva(c) for c in otrasCurvas]
     otros = [o for o in otros if o.shape[0] > 0]
     if not otros:
-        return True, True
+        return (EXTENSION_EXTREMOS_MM, EXTENSION_EXTREMOS_MM, np.inf, np.inf)
     todos = np.vstack(otros)
 
-    def _libre(p):
-        return float(np.linalg.norm(todos - p[None, :], axis=1).min()) > tolMM
+    def _largo(p):
+        d = float(np.linalg.norm(todos - p[None, :], axis=1).min())
+        if d <= UNION_TOLERANCIA_MM:
+            return d + SOLAPE_UNION_MM, d
+        return EXTENSION_EXTREMOS_MM, d
 
-    return _libre(pts[0]), _libre(pts[-1])
+    lIni, dIni = _largo(pts[0])
+    lFin, dFin = _largo(pts[-1])
+    return lIni, lFin, dIni, dFin
+
+
+
+def _tangentes(pos, esCerrada):
+    """Tangente unitaria de la polilinea en cada punto."""
+    n = pos.shape[0]
+    if n < 2:
+        return np.tile(np.array([1.0, 0.0, 0.0]), (max(n, 1), 1))
+    if esCerrada:
+        t = np.roll(pos, -1, axis=0) - np.roll(pos, 1, axis=0)
+    else:
+        t = np.empty_like(pos)
+        t[1:-1] = pos[2:] - pos[:-2]
+        t[0] = pos[1] - pos[0]
+        t[-1] = pos[-1] - pos[-2]
+    nn = np.linalg.norm(t, axis=1)
+    nn[nn < 1e-12] = 1.0
+    return t / nn[:, None]
+
+
+
+def _base_plano_normal(normales, tangentes):
+    """
+    Base ortonormal (n, b) del PLANO PERPENDICULAR A LA CURVA. La busqueda vive
+    solo aca dentro: la unica libertad es cuanto se ladea el corte en la
+    seccion transversal de la placa. Asi el corte no puede "descuadrarse" a lo
+    largo de la curva.
+    """
+    proy = np.sum(normales * tangentes, axis=1)
+    n = normales - tangentes * proy[:, None]
+    nn = np.linalg.norm(n, axis=1)
+    malos = nn < 1e-6
+    if np.any(malos):
+        n[malos] = normales[malos]
+        nn = np.linalg.norm(n, axis=1)
+    nn[nn < 1e-12] = 1.0
+    n = n / nn[:, None]
+    b = np.cross(tangentes, n)
+    bn = np.linalg.norm(b, axis=1)
+    bn[bn < 1e-12] = 1.0
+    return n, b / bn[:, None]
 
 
 # ============================================================
@@ -665,6 +785,184 @@ def _barrido(vol, pos, dirs, topeSinSalidaMM=None):
     return curtain, recorrido, atraviesa
 
 
+def _medir_cruce(vol, pos, dirs, paso, g, mMargen):
+    """
+    Recorrido GEOMETRICO hasta salir del hueso (los dos lados sumados) y si
+    logro salir de ambos.
+
+    Es recorrido, NO cantidad de hueso: en diploe poroso, minimizar hueso
+    premiaba a las direcciones oblicuas que enhebran los espacios medulares,
+    que cruzan menos hueso pero recorren mucho mas camino. El recorrido es el
+    espesor real de la placa en esa direccion y los poros no lo engañan.
+    """
+    P = pos.shape[0]
+    ts = np.arange(0.0, PROFUNDIDAD_MAX_MM + paso, paso)
+    T = int(ts.size)
+    rec = np.zeros(P, dtype=float)
+    sal = np.ones(P, dtype=bool)
+    for signo in (1.0, -1.0):
+        m = (pos[:, None, :] +
+             dirs[:, None, :] * (signo * ts)[None, :, None]).reshape(-1, 3)
+        _, _, H, A = vol.muestrear(m)
+        _, r, s = _indice_de_salida(H.reshape(P, T), A.reshape(P, T), g, mMargen)
+        rec += r * paso
+        sal &= s
+    return rec, sal
+
+
+
+def _viterbi_angulos(costo, resDeg, esCerrada):
+    """
+    [C1] Elige la SECUENCIA de angulos de costo total minimo, con la
+    restriccion dura de no girar mas de MAX_GIRO_POR_PASO_DEG entre puntos
+    consecutivos. Programacion dinamica exacta, O(N x K^2).
+
+    Esta es la pieza que hace imposible el tajo random. Elegir el minimo en
+    cada punto POR SEPARADO (lo que hacian v14/v15) permite que dos vecinos
+    caigan en minimos opuestos; aca la transicion prohibida tiene costo
+    infinito, asi que esa secuencia directamente no existe en el espacio de
+    soluciones.
+
+    costo: (N, K). Devuelve el indice de angulo elegido por punto, (N,).
+    """
+    N, K = costo.shape
+    if N == 0:
+        return np.zeros(0, dtype=np.int32)
+    if N == 1:
+        return np.array([int(np.argmin(costo[0]))], dtype=np.int32)
+
+    dk = max(1, int(round(MAX_GIRO_POR_PASO_DEG / max(resDeg, 1e-6))))
+    salto = np.abs(np.arange(K)[:, None] - np.arange(K)[None, :])
+    INF = 1e18
+    trans = np.where(salto <= dk, PESO_SUAVIDAD * salto * resDeg, INF)
+
+    # en curvas cerradas la costura se pone donde la eleccion es menos ambigua
+    off = int(np.argmin(costo.min(axis=1))) if esCerrada and N > 2 else 0
+    C = np.roll(costo, -off, axis=0) if off else costo
+
+    acum = C[0].copy()
+    prev = np.zeros((N, K), dtype=np.int32)
+    cols = np.arange(K)
+    for i in range(1, N):
+        tot = acum[:, None] + trans          # (K anterior, K actual)
+        pk = np.argmin(tot, axis=0)
+        acum = tot[pk, cols] + C[i]
+        prev[i] = pk
+
+    idx = np.zeros(N, dtype=np.int32)
+    idx[-1] = int(np.argmin(acum))
+    for i in range(N - 1, 0, -1):
+        idx[i - 1] = prev[i, idx[i]]
+    return np.roll(idx, off) if off else idx
+
+
+
+def _buscar_camino_mas_corto(vol, pos, normales, tangentes, esCerrada):
+    """
+    [C1] EL cambio de v17.
+
+    Busca, para toda la curva a la vez, la SECUENCIA de direcciones que
+    atraviesa el hueso por el camino mas corto, con la restriccion dura de que
+    de un punto al siguiente el angulo no pueda girar mas de
+    MAX_GIRO_POR_PASO_DEG.
+
+    Por que asi y no punto por punto (que es lo que hacian v14/v15):
+      Si en un punto el mejor camino es +40 grados y en el vecino es -40 (dos
+      minimos casi empatados, comun en geometria complicada), eligiendo por
+      separado quedan dos rayos VECINOS apuntando a lados opuestos. Eso es el
+      tajo random. Y suavizar despues no arregla nada: el promedio de +40 y -40
+      es 0, que no es ninguna de las dos y suele ser la direccion rasante.
+
+      Con la restriccion de giro, esa situacion es IMPOSIBLE POR CONSTRUCCION.
+      Y como se optimiza la suma de toda la curva, la solucion se "compromete":
+      si al conjunto de la ceja le conviene resolverlo yendo hacia arriba, van
+      todos hacia arriba; ninguno se escapa hacia la orbita porque ahi seria un
+      poquito mas corto, porque cambiar de bando cuesta caro en el total.
+
+    Se resuelve exacto con programacion dinamica (Viterbi) sobre la grilla de
+    angulos: costo O(N x K^2), milisegundos.
+
+    Devuelve (dirs, angulos, atraviesaElegido, diag).
+    """
+    N = pos.shape[0]
+    n, b = _base_plano_normal(normales, tangentes)
+
+    K = max(3, int(N_ANGULOS_BUSQUEDA))
+    thetas = np.radians(np.linspace(-ANGULO_BUSQUEDA_MAX, ANGULO_BUSQUEDA_MAX, K))
+    resDeg = (2.0 * ANGULO_BUSQUEDA_MAX) / (K - 1)
+
+    paso = max(min(vol.spacing) * PASO_BUSQUEDA_VOXELES, 0.05)
+    g = max(1, int(round(GRACIA_INICIO_MM / paso)))
+    mMargen = max(1, int(round(MARGEN_SALIDA_MM / paso)))
+
+    # --- costo de cada (punto, angulo) ---
+    costo = np.empty((N, K), dtype=float)
+    recor = np.empty((N, K), dtype=float)
+    pasaKK = np.zeros((N, K), dtype=bool)
+    for k, th in enumerate(thetas):
+        d = np.cos(th) * n + np.sin(th) * b
+        r = np.empty(N)
+        s = np.empty(N, dtype=bool)
+        for ini in range(0, N, BLOQUE_BUSQUEDA):
+            fin = min(ini + BLOQUE_BUSQUEDA, N)
+            rr, ss = _medir_cruce(vol, pos[ini:fin], d[ini:fin], paso, g, mMargen)
+            r[ini:fin] = rr
+            s[ini:fin] = ss
+        ok = s & (r >= ESPESOR_MIN_VALIDO)
+        # entre dos direcciones de recorrido parecido gana la mas perpendicular
+        costo[:, k] = np.where(ok,
+                               r * (1.0 + PESO_REGULARIZACION * (1.0 - np.cos(th))),
+                               PENAL_SIN_SALIDA_MM)
+        recor[:, k] = r
+        pasaKK[:, k] = ok
+
+    idx = _viterbi_angulos(costo, resDeg, esCerrada)
+    ang = thetas[idx]
+    fila = np.arange(N)
+    pasa = pasaKK[fila, idx]
+    rec = recor[fila, idx]
+
+    dirs = np.cos(ang)[:, None] * n + np.sin(ang)[:, None] * b
+    nn = np.linalg.norm(dirs, axis=1)
+    nn[nn < 1e-12] = 1.0
+    dirs = dirs / nn[:, None]
+
+    grados = np.degrees(ang)
+    giro = np.abs(np.diff(grados)) if N > 1 else np.zeros(1)
+    diag = {
+        "inclinacionMediana": float(np.median(np.abs(grados))),
+        "inclinacionMax": float(np.max(np.abs(grados))),
+        "giroMaxPorPaso": float(np.max(giro)) if giro.size else 0.0,
+        "resolucionAngular": resDeg,
+        "recorridoConBusqueda": float(np.median(rec[pasa])) if np.any(pasa) else 0.0,
+    }
+    return dirs, ang, pasa, diag
+
+
+
+def _tirada_mas_larga(pasa, esCerrada):
+    """
+    [C3] Tirada CONTINUA mas larga de puntos que no atraviesan, en numero de
+    puntos.
+
+    Este es el numero que decide si el hueso se separa o no. El porcentaje
+    engaña: la separacion no es un promedio, es una CADENA. Cortar el 95% de
+    una cinta y dejar el 5% intacto no deja la cinta "95% cortada": la deja
+    entera. 16 puntos seguidos a 0.37mm son ~6mm de hueso macizo que sostienen
+    todo el colgajo.
+    """
+    mal = ~np.asarray(pasa, dtype=bool)
+    if not mal.any():
+        return 0
+    x = np.concatenate([mal, mal]) if esCerrada else mal
+    mejor = actual = 0
+    for v in x:
+        actual = actual + 1 if v else 0
+        if actual > mejor:
+            mejor = actual
+    return int(min(mejor, mal.size))
+
+
 def _resumen_penetracion(recorrido, atraviesa):
     """De los dos lados del barrido, uno sale al aire enseguida y el otro entra
     al hueso. Nos interesa el que entra: cuanto penetro y si atraveso."""
@@ -735,34 +1033,54 @@ def _dilatar_a_kerf(curtain, vol, grosorMM):
 # ============================================================
 # PARTE 4 - ANILLO DE CORTE DE UNA CURVA
 # ============================================================
-def _preparar_curva(curvaNode, campo, esCerrada, otrasCurvas, distMuestreo):
-    """Puntos resampleados + extensiones + direcciones. Comun a diagnosticar y
-    a cortar."""
+def _preparar_curva(curvaNode, campo, esCerrada, otrasCurvas, distMuestreo,
+                    vol=None):
+    """
+    Puntos resampleados + extensiones + direcciones. Comun a diagnosticar y
+    cortar, para que las dos vean exactamente lo mismo.
+
+    Si se pasa 'vol' y BUSCAR_CAMINO_MAS_CORTO esta activo, la direccion ya
+    sale corregida por la busqueda coherente [C1].
+    """
     pv = curvaNode.GetCurvePointsWorld()
     if pv is None or pv.GetNumberOfPoints() < 2:
         return None, None, {"error": "curva con menos de 2 puntos"}
+
     posiciones = _quitar_coincidentes(_resamplear_puntos(pv, distMuestreo), esCerrada)
     posiciones = list(posiciones)
     esExt = np.zeros(len(posiciones), dtype=bool)
-    extIni = extFin = False
-    if not esCerrada and EXTENSION_EXTREMOS_MM > 0:
-        extIni, extFin = _puntas_libres(curvaNode, otrasCurvas, UNION_TOLERANCIA_MM)
+    info = {}
+    if not esCerrada:
+        lIni, lFin, dIni, dFin = _largo_extension_puntas(curvaNode, otrasCurvas)
         posiciones, esExt = _extender_extremos(
-            posiciones, EXTENSION_EXTREMOS_MM, distMuestreo, extIni, extFin, campo)
+            posiciones, lIni, lFin, distMuestreo, campo)
+        info = {"largoExtIni": lIni, "largoExtFin": lFin,
+                "distUnionIni": dIni, "distUnionFin": dFin}
+
     if len(posiciones) < 2:
         return None, None, {"error": "curva demasiado corta tras el resampleo"}
+
     dirs, diag = _direcciones_de_curva(campo, posiciones, esExt, esCerrada, distMuestreo)
     if dirs is None:
         return None, None, diag
-    diag["extIni"] = bool(extIni)
-    diag["extFin"] = bool(extFin)
-    return np.asarray(posiciones, dtype=float), dirs, diag
+    diag.update(info)
+
+    pos = np.asarray(posiciones, dtype=float)
+    if vol is not None and BUSCAR_CAMINO_MAS_CORTO:
+        tang = _tangentes(pos, esCerrada)
+        dirs, ang, pasaB, diagB = _buscar_camino_mas_corto(
+            vol, pos, dirs, tang, esCerrada)
+        diag.update(diagB)
+        diag["busqueda"] = True
+    else:
+        diag["busqueda"] = False
+    return pos, dirs, diag
 
 
 def _anillo_de_corte(vol, curvaNode, campo, esCerrada, otrasCurvas,
                      distMuestreo, nIslasAntes=None):
     pos, dirs, diag = _preparar_curva(curvaNode, campo, esCerrada,
-                                      otrasCurvas, distMuestreo)
+                                      otrasCurvas, distMuestreo, vol)
     if pos is None:
         return None, diag
     diag["puntosSinPasarXYZ"] = np.zeros((0, 3))
@@ -774,6 +1092,10 @@ def _anillo_de_corte(vol, curvaNode, campo, esCerrada, otrasCurvas,
     diag["nPuntos"] = int(pos.shape[0])
     diag["nNoAtraviesa"] = int(np.count_nonzero(~pasa0))
     diag["fracNoAtraviesa"] = float(np.count_nonzero(~pasa0) / max(pos.shape[0], 1))
+    # [C3] lo que de verdad decide la separacion
+    tirada = _tirada_mas_larga(pasa0, esCerrada)
+    diag["tiradaPuntos"] = tirada
+    diag["tiradaMM"] = tirada * distMuestreo
 
     if np.any(pasa0):
         espTipico = float(np.median(pen0[pasa0]))
@@ -1103,19 +1425,29 @@ def _reportar_curva(nombre, tipo, diag):
     nNo = diag.get("nNoAtraviesa", 0)
     frac = diag.get("fracNoAtraviesa", 0.0)
     _p("  '%s' (%s): %d puntos" % (nombre, tipo, n))
+    if diag.get("busqueda"):
+        _p("      camino mas corto: inclinacion mediana %.1f deg, max %.1f deg"
+           % (diag.get('inclinacionMediana', 0), diag.get('inclinacionMax', 0)))
+        _p("      giro maximo entre puntos vecinos: %.1f deg (limite %s) -> "
+           "sin abanicos" % (diag.get('giroMaxPorPaso', 0), MAX_GIRO_POR_PASO_DEG))
     _p("      ATRAVIESA EL HUESO: %d/%d puntos (%.1f%%)"
        % (n - nNo, n, 100.0 * (1.0 - frac)))
+    # [C3] EL numero que decide
+    tmm = diag.get("tiradaMM", 0.0)
+    if tmm > 0:
+        _p("      >> PUENTE MAS LARGO SIN CORTAR: %.1fmm (%d puntos seguidos)"
+           % (tmm, diag.get('tiradaPuntos', 0)))
+        _p("         ESTE es el numero que decide, no el porcentaje: la")
+        _p("         separacion es una cadena, no un promedio. Un solo puente")
+        _p("         continuo sostiene toda la pieza.")
+    else:
+        _p("      >> sin puentes: el corte atraviesa en TODO el recorrido")
     _p("      espesor atravesado: mediana %.2fmm, max %.2fmm"
        % (diag.get('espesorMediano', 0), diag.get('espesorMax', 0)))
     if nNo > 0:
-        _p("      >> %d punto(s) NO atraviesan. Ahi el corte se detiene a "
-           "%.1fmm y NO improvisa. Marcados en rojo."
-           % (nNo, diag.get('topeSinSalida', 0)))
-        if frac > AVISO_SI_NO_ATRAVIESA:
-            _p("         Es una zona donde la perpendicular a la superficie corre")
-            _p("         a lo largo de la placa (tipico detras de los ojos).")
-            _p("         Solucion: una linea adicional sobre la cara por la que si")
-            _p("         se puede entrar. No es un bug, es geometria.")
+        _p("      %d punto(s) no atraviesan; ahi el corte se detiene a %.1fmm y "
+           "NO improvisa (marcados en rojo)." % (nNo, diag.get('topeSinSalida', 0)))
+    huecos = _reportar_puntas(diag)
     if diag.get("espesorMax", 0) > ESPESOR_MAX_ESPERADO:
         _p("      recorrido max > %smm: revisar si el hueso es realmente tan "
            "grueso ahi." % ESPESOR_MAX_ESPERADO)
@@ -1131,9 +1463,43 @@ def _reportar_curva(nombre, tipo, diag):
             _p("      SEPARACION: OK (+%d pieza(s))" % diag.get('islasNuevas', 0))
         else:
             _p("      >> SEPARACION: NO. Este corte quedo grabado pero NO partio")
-            _p("         el hueso. Mirar cuantos puntos no atraviesan.")
-    if not diag.get("extIni", True) or not diag.get("extFin", True):
-        _p("      punta(s) unida(s) a otra linea: no se extendieron")
+            _p("         el hueso. Mira el PUENTE MAS LARGO de arriba.")
+            _p("         Recorda: en un craneo cerrado una linea abierta sola NUNCA")
+            _p("         separa; solo separa un LAZO. Dos lineas separan unicamente")
+            _p("         si cierran el lazo entre las dos, en LOS DOS extremos.")
+    return huecos
+
+
+def _reportar_puntas(diag):
+    """
+    [C2] Estado de cada punta de una curva abierta: union cerrada, libre, o
+    HUECO con otra curva. En corte_V17.py este texto esta repetido en
+    diagnosticar() y en _reportar_curva(); aca esta una sola vez.
+
+    Devuelve la lista de huecos [{"punta", "distancia", "extension", "hueco"}]
+    (mm), para que la interfaz pueda avisarlos.
+    """
+    huecos = []
+    for lado, cl, dl in (("inicio", "largoExtIni", "distUnionIni"),
+                         ("fin", "largoExtFin", "distUnionFin")):
+        if cl not in diag:
+            continue
+        d = diag[dl]
+        if np.isfinite(d) and d <= UNION_TOLERANCIA_MM:
+            _p("      punta %s: UNION a %.1fmm de otra curva -> extendida %.1fmm "
+               "para CERRARLA" % (lado, d, diag[cl]))
+        elif np.isfinite(d) and d < 20.0 and d > diag[cl]:
+            _p("      >> punta %s: hay otra curva a %.1fmm pero se" % (lado, d))
+            _p("         extendio solo %.1fmm -> QUEDA UN HUECO de %.1fmm."
+               % (diag[cl], d - diag[cl]))
+            _p("         Si esas dos curvas tenian que unirse, acerca las puntas")
+            _p("         o subi UNION_TOLERANCIA_MM por encima de %.1f." % d)
+            huecos.append({"punta": lado, "distancia": float(d),
+                           "extension": float(diag[cl]),
+                           "hueco": float(d - diag[cl])})
+        else:
+            _p("      punta %s: libre -> extendida %.1fmm" % (lado, diag[cl]))
+    return huecos
 
 
 # ============================================================
@@ -1181,7 +1547,8 @@ def diagnosticar():
     for curva in curvas:
         esCerrada = curva.IsA('vtkMRMLMarkupsClosedCurveNode')
         otras = [c for c in curvas if c is not curva]
-        pos, dirs, diag = _preparar_curva(curva, campo, esCerrada, otras, distMuestreo)
+        pos, dirs, diag = _preparar_curva(curva, campo, esCerrada, otras,
+                                          distMuestreo, vol)
         if pos is None:
             _p("  '%s': %s" % (curva.GetName(), diag.get('error', 'sin resultado')))
             resumen.append({"nombre": curva.GetName(), "error":
@@ -1191,25 +1558,50 @@ def diagnosticar():
         pen, pasa, signo = _resumen_penetracion(rec, atr)
         n = pos.shape[0]
         nNo = int(np.count_nonzero(~pasa))
+        tirada = _tirada_mas_larga(pasa, esCerrada)
         tipo = "lazo" if esCerrada else "linea"
         _p("  '%s' (%s): %d puntos" % (curva.GetName(), tipo, n))
+        if diag.get("busqueda"):
+            _p("      camino mas corto: inclinacion mediana %.1f deg, max %.1f deg"
+               "   |   giro max entre vecinos %.1f deg"
+               % (diag.get('inclinacionMediana', 0), diag.get('inclinacionMax', 0),
+                  diag.get('giroMaxPorPaso', 0)))
         _p("      ATRAVIESA: %d/%d (%.1f%%)"
            % (n - nNo, n, 100.0 * (n - nNo) / max(n, 1)))
+        if tirada:
+            _p("      >> PUENTE MAS LARGO SIN CORTAR: %.1fmm (%d puntos seguidos)"
+               "  <-- ESTE decide la separacion" % (tirada * distMuestreo, tirada))
+        else:
+            _p("      >> sin puentes: atraviesa en TODO el recorrido")
         espMed = float(np.median(pen[pasa])) if np.any(pasa) else 0.0
         espMax = float(np.max(pen[pasa])) if np.any(pasa) else 0.0
         if np.any(pasa):
             _p("      espesor atravesado: mediana %.2fmm, max %.2fmm"
                % (espMed, espMax))
+        huecos = _reportar_puntas(diag)
         if nNo:
-            _p("      >> %d punto(s) NO atraviesan (picos ROJOS)" % nNo)
+            _p("      %d punto(s) no atraviesan (picos ROJOS)" % nNo)
             sinPasar.append(pos[~pasa])
         resumen.append({"nombre": curva.GetName(), "tipo": tipo, "nPuntos": n,
                         "nNoAtraviesa": nNo, "espesorMediano": espMed,
-                        "espesorMax": espMax, "error": None})
+                        "espesorMax": espMax,
+                        "tiradaPuntos": tirada,
+                        "tiradaMM": tirada * distMuestreo,
+                        "busqueda": bool(diag.get("busqueda")),
+                        "inclinacionMediana": diag.get("inclinacionMediana", 0.0),
+                        "inclinacionMax": diag.get("inclinacionMax", 0.0),
+                        "giroMaxPorPaso": diag.get("giroMaxPorPaso", 0.0),
+                        "huecosUnion": huecos,
+                        "error": None})
 
+        # los picos se dibujan RECORTADOS al mismo tope que usa cortar(): un
+        # rayo que no atraviesa recorreria los 25mm enteros y se veria como una
+        # varilla larguisima disparada al aire, que asusta y no informa.
+        espTip = float(np.median(pen[pasa])) if np.any(pasa) else TOPE_SIN_SALIDA_MIN_MM
+        topeDib = max(TOPE_SIN_SALIDA_MIN_MM, TOPE_SIN_SALIDA_FACTOR * espTip)
         paso = max(1, n // 500)
         for i in range(0, n, paso):
-            largo = max(float(pen[i]), 0.6)
+            largo = max(min(float(pen[i]), topeDib), 0.6)
             a = pos[i]
             b = pos[i] + dirs[i] * signo[i] * largo
             ia = puntosVis.InsertNextPoint(*a)
@@ -1288,7 +1680,10 @@ def cortar():
     etiquetasPadre, nPadres = ndimage.label(boneMask)
 
     _p("Bloque F %s" % BLOQUE_F_VERSION)
-    _p("  direccion SIEMPRE perpendicular; kerf objetivo %smm" % GROSOR_CORTE_MM)
+    _p("  camino mas corto %s  cono +-%sdeg  giro max %sdeg/paso"
+       % ("ON" if BUSCAR_CAMINO_MAS_CORTO else "OFF",
+          ANGULO_BUSQUEDA_MAX, MAX_GIRO_POR_PASO_DEG))
+    _p("  kerf objetivo %smm" % GROSOR_CORTE_MM)
     _p("  salida: espacio abierto >%smm + margen %smm"
        % (UMBRAL_ESPACIO_ABIERTO_MM, MARGEN_SALIDA_MM))
     _p("  sin salida -> corte en seco a %sx el espesor tipico (min %smm)"
@@ -1319,12 +1714,20 @@ def cortar():
             continue
         anilloTotal |= anillo
         kerfReal = diag.get("kerfReal", kerfReal)
-        _reportar_curva(curva.GetName(), "lazo" if esCerrada else "linea", diag)
+        huecos = _reportar_curva(curva.GetName(),
+                                 "lazo" if esCerrada else "linea", diag)
         resumenCurvas.append({
             "nombre": curva.GetName(),
             "nPuntos": diag.get("nPuntos", 0),
             "nNoAtraviesa": diag.get("nNoAtraviesa", 0),
             "espesorMediano": diag.get("espesorMediano", 0.0),
+            "tiradaPuntos": diag.get("tiradaPuntos", 0),
+            "tiradaMM": diag.get("tiradaMM", 0.0),
+            "busqueda": bool(diag.get("busqueda")),
+            "inclinacionMediana": diag.get("inclinacionMediana", 0.0),
+            "inclinacionMax": diag.get("inclinacionMax", 0.0),
+            "giroMaxPorPaso": diag.get("giroMaxPorPaso", 0.0),
+            "huecosUnion": huecos,
             "separo": diag.get("separo"),
             "error": None,
         })
