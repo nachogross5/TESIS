@@ -1,75 +1,126 @@
-import numpy as np
-import logging
-import os
-from typing import Annotated
+# -*- coding: utf-8 -*-
+# ============================================================
+# CRANIOPLAN - MODULO DE 3D SLICER
+# Planificacion prequirurgica de craneosinostosis
+#
+# Trabajo final de grado, Ingenieria Biomedica, FCEFyN-UNC.
+# Valentino Andri e Ignacio Gross.
+# En colaboracion con el Servicio de Neurocirugia del Hospital Garrahan.
+# ============================================================
+#
+# COMO ESTA ORGANIZADO ESTE ARCHIVO
+# ---------------------------------
+# Tres clases, como pide Slicer:
+#
+#   CranioPlan        - registro del modulo (titulo, categoria, ayuda)
+#   CranioPlanWidget  - la interfaz: botones, paneles, mensajes al medico
+#   CranioPlanLogic   - orquesta los bloques. NO tiene ni un widget adentro.
+#
+# Los algoritmos NO estan aca: viven en CranioPlanLib/, un archivo por bloque.
+# La Logic solo los llama en orden y traduce sus resultados. Esa separacion es
+# la que permite que Nacho cambie el corte sin tocar la interfaz y que la
+# interfaz cambie sin tocar los algoritmos.
+#
+#   CranioPlanLib/Comun.py   - nombres de nodos compartidos
+#   CranioPlanLib/BloqueC.py - elegir y cargar la serie DICOM correcta
+#   CranioPlanLib/BloqueA.py - preparar el craneo (v7.2)
+#   CranioPlanLib/BloqueF.py - cortar (v16)
+#   CranioPlanLib/BloqueG.py - reacomodar las piezas (v1)
+#
+# EL FLUJO, DE PUNTA A PUNTA
+# --------------------------
+#   Paso 1  carpeta del paciente  -> Bloque C -> volumen cargado
+#   Paso 2  generar craneo        -> Bloque A -> revision -> "Craneo_Final"
+#   Paso 3  lineas de corte       -> Bloque F -> piezas separadas
+#   Paso 4  reacomodar            -> Bloque G -> armado nuevo + medidas
+#   Paso 5  exportar              -> STL para el molde / guia de corte
+#
+# Cada paso arranca deshabilitado y se habilita cuando el anterior termino. No
+# es decoracion: casi todos los errores de la version anterior venian de correr
+# un bloque sin que el anterior hubiera dejado lo que ese bloque busca.
+# ============================================================
 
-import vtk
+import os
+import sys
+
 import qt
 import ctk
-import pydicom
-
 import slicer
 from slicer.i18n import tr as _
 from slicer.i18n import translate
 from slicer.ScriptedLoadableModule import *
 from slicer.util import VTKObservationMixin
-from slicer.parameterNodeWrapper import (
-    parameterNodeWrapper,
-    WithinRange,
-)
-from DICOMLib import DICOMUtils
-
+from slicer.parameterNodeWrapper import parameterNodeWrapper
 from slicer import vtkMRMLScalarVolumeNode
 
+# --- La libreria vive al lado de este archivo -------------------------------
+# Slicer agrega al sys.path la carpeta del modulo, pero no siempre y no en
+# todas las versiones. Agregarla explicitamente evita el "ModuleNotFoundError:
+# CranioPlanLib" que aparece solo en algunas instalaciones.
+_CARPETA_MODULO = os.path.dirname(os.path.abspath(__file__))
+if _CARPETA_MODULO not in sys.path:
+    sys.path.insert(0, _CARPETA_MODULO)
 
-# Cartel de versión: se imprime en consola al correr los bloques.
-# Sirve para confirmar de un vistazo QUÉ versión está realmente cargada
-# en Slicer (después de un Reload), y no depender de suponerlo.
-CRANIOPLAN_VERSION = "2026-07-26-j (flap por partición geométrica del prisma del lazo: siempre separa)"
+import CranioPlanLib                                   # noqa: E402
+from CranioPlanLib import Comun                        # noqa: E402
+from CranioPlanLib import BloqueC, BloqueA, BloqueF, BloqueG   # noqa: E402
 
 
-#
-# CranioPlan
-#
+CRANIOPLAN_VERSION = "2026-08-21 - Bloque A v7.2 + Corte v16 + Bloque G v1"
+
+# --- Colores de los carteles de estado ---
+GRIS    = "color: #777777;"
+AZUL    = "color: #1F4E79;"
+VERDE   = "color: #1E7B45; font-weight: bold;"
+AMBAR   = "color: #B8860B; font-weight: bold;"
+ROJO    = "color: #C0392B; font-weight: bold;"
+NARANJA = "color: #E67E22;"
+
+ESTILO_BOTON_PRINCIPAL = (
+    "background-color: #1E7B45; color: white; font-weight: bold; padding: 7px;")
+ESTILO_BOTON_ACCION = (
+    "background-color: #1F4E79; color: white; font-weight: bold; padding: 7px;")
+ESTILO_BOTON_QUITAR = (
+    "padding: 3px 8px; background-color: #C0392B; color: white;")
 
 
+# ============================================================
+# REGISTRO DEL MODULO
+# ============================================================
 class CranioPlan(ScriptedLoadableModule):
 
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("CranioPlan")
-        self.parent.categories = [translate("qSlicerAbstractCoreModule", "Craneofacial")]
+        self.parent.categories = [translate("qSlicerAbstractCoreModule",
+                                            "Craneofacial")]
         self.parent.dependencies = []
         self.parent.contributors = ["Valentino Andri", "Ignacio Gross"]
         self.parent.helpText = _("""
-Módulo de planificación prequirúrgica para craneosinostosis.
-Trabajo final de grado, Ingeniería Biomédica, FCEFyN-UNC.
+Planificacion prequirurgica de craneosinostosis a partir de la tomografia del
+paciente: carga del estudio, reconstruccion 3D del craneo, trazado de las
+osteotomias, reacomodamiento de las piezas y exportacion para el molde.
+
+Trabajo final de grado, Ingenieria Biomedica, FCEFyN - UNC.
 """)
         self.parent.acknowledgementText = _("""
-Desarrollado en colaboración con el Servicio de Neurocirugía del
-Hospital Garrahan, Buenos Aires.
+Desarrollado junto al Servicio de Neurocirugia del Hospital de Pediatria SAMIC
+"Prof. Dr. Juan P. Garrahan", Buenos Aires.
 """)
 
 
-#
-# CranioPlanParameterNode
-#
-
-
+# ============================================================
+# PARAMETROS QUE SE GUARDAN CON LA ESCENA
+# ============================================================
 @parameterNodeWrapper
 class CranioPlanParameterNode:
-    """
-    Parámetros que se guardan junto con la escena de Slicer.
-    estudioCargado - El volumen DICOM que se cargó en el Paso 1.
-    """
+    """estudioCargado: el volumen de la tomografia que se cargo en el Paso 1."""
     estudioCargado: vtkMRMLScalarVolumeNode = None
 
 
-#
-# CranioPlanWidget
-#
-
-
+# ============================================================
+# INTERFAZ
+# ============================================================
 class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def __init__(self, parent=None) -> None:
@@ -79,226 +130,1308 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._parameterNode = None
         self._parameterNodeGuiTag = None
 
-        # Estado interno del Bloque B
-        self._segmentationNode = None
-        self._islasRevision = []
-        self._coloresOriginales = {}
-        self._botonesIslas = []
+        # Estado de la interfaz
+        self._seriesOrdenadas = []      # ranking de series del Paso 1
+        self._filasPiezas = []          # filas del panel de revision (Paso 2)
+        self._curvas = []               # curvas de corte trazadas (Paso 3)
+        self._curvaEnCurso = None
+        self._observadorCurva = None
+        self._filasFragmentos = []      # filas del panel de piezas (Paso 4)
+        self._piezaSeleccionada = None
+        self.placeWidget = None
 
-        # Estado interno del Bloque F (planificación de osteotomías).
-        #
-        # MODELO MENTAL (correcto): en todo momento hay UN "cráneo
-        # restante" (todo el hueso que todavía no se extrajo) y una lista
-        # de fragmentos ya extraídos, que quedan aparte. Cada corte opera
-        # SOLO sobre el cráneo restante; los fragmentos ya extraídos no se
-        # vuelven a cortar. Tras cada corte, el cráneo restante se
-        # reemplaza por el nuevo restante y el/los flap(s) recién
-        # separados se agregan a la lista de extraídos.
-        self._craneoRestante = None        # un vtkMRMLModelNode
-        self._fragmentosExtraidos = []     # lista de vtkMRMLModelNode
-
-        self._curvaCorteActual = None
-        self._curvaEsCerrada = False  # se fija al trazar, según el checkbox
-        self._observadorCurvaTag = None  # para seguir los puntos en tiempo real
-        self.placeWidgetCorte = None  # qSlicerMarkupsPlaceWidget, se crea en setup()
-
+    # --------------------------------------------------------
+    # CONSTRUCCION DE LA INTERFAZ
+    # --------------------------------------------------------
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
 
-        print(f"CranioPlan {CRANIOPLAN_VERSION}: módulo cargado.")
+        # Recargar la libreria en cada Reload del modulo. Sin esto, tocar
+        # BloqueF.py y apretar Reload deja corriendo el codigo viejo, porque
+        # Python cachea los modulos ya importados.
+        try:
+            CranioPlanLib.recargar()
+        except Exception as e:
+            print("CranioPlan: no se pudo recargar la libreria: %s" % e)
 
-        self.logic = CranioPlanLogic()
+        self.logic = CranioPlanLogic(log=self._log)
+        print("CranioPlan %s: modulo cargado." % CRANIOPLAN_VERSION)
 
-        # -------------------------------------------------------
-        # PASO 1 — Cargar estudio
-        # -------------------------------------------------------
-        pasoUnoCollapsible = ctk.ctkCollapsibleButton()
-        pasoUnoCollapsible.text = "Paso 1 — Cargar estudio"
-        self.layout.addWidget(pasoUnoCollapsible)
-        pasoUnoLayout = qt.QVBoxLayout(pasoUnoCollapsible)
+        self._construirPaso1()
+        self._construirPaso2()
+        self._construirPaso3()
+        self._construirPaso4()
+        self._construirPaso5()
+        self._construirConsola()
 
-        instrucciones = qt.QLabel(
-            "Seleccioná la carpeta con la tomografía del paciente.\n"
-            "El sistema va a buscar y cargar el estudio automáticamente."
-        )
-        instrucciones.setWordWrap(True)
-        pasoUnoLayout.addWidget(instrucciones)
-
-        self.botonCargarEstudio = qt.QPushButton("Seleccionar carpeta del estudio...")
-        self.botonCargarEstudio.toolTip = "Elegí la carpeta DICOM que te mandaron del Garrahan"
-        pasoUnoLayout.addWidget(self.botonCargarEstudio)
-
-        self.etiquetaEstadoCarga = qt.QLabel("Todavía no se cargó ningún estudio.")
-        self.etiquetaEstadoCarga.setStyleSheet("color: gray;")
-        pasoUnoLayout.addWidget(self.etiquetaEstadoCarga)
-
-        self.botonCargarEstudio.connect("clicked(bool)", self.onBotonCargarEstudioClicked)
-
-        # -------------------------------------------------------
-        # PASO 2 — Generar cráneo 3D
-        # -------------------------------------------------------
-        pasoDosCollapsible = ctk.ctkCollapsibleButton()
-        pasoDosCollapsible.text = "Paso 2 — Generar cráneo 3D"
-        self.layout.addWidget(pasoDosCollapsible)
-        self.pasoDosLayout = qt.QVBoxLayout(pasoDosCollapsible)
-
-        instruccionesPasoDos = qt.QLabel(
-            "Con el estudio ya cargado, generá automáticamente el modelo 3D del cráneo.\n"
-            "El sistema va a identificar las partes candidatas para que puedas "
-            "revisarlas antes de confirmar."
-        )
-        instruccionesPasoDos.setWordWrap(True)
-        self.pasoDosLayout.addWidget(instruccionesPasoDos)
-
-        self.botonGenerarCraneo = qt.QPushButton("Generar cráneo 3D")
-        self.botonGenerarCraneo.toolTip = "Aplica segmentación automática sobre el estudio cargado"
-        self.pasoDosLayout.addWidget(self.botonGenerarCraneo)
-
-        self.etiquetaEstadoCraneo = qt.QLabel("Todavía no se generó el cráneo.")
-        self.etiquetaEstadoCraneo.setStyleSheet("color: gray;")
-        self.pasoDosLayout.addWidget(self.etiquetaEstadoCraneo)
-
-        self.botonGenerarCraneo.connect("clicked(bool)", self.onBotonGenerarCraneoClicked)
-
-        self.separadorRevision = qt.QFrame()
-        self.separadorRevision.setFrameShape(qt.QFrame.HLine)
-        self.separadorRevision.setStyleSheet("color: #CCCCCC;")
-        self.pasoDosLayout.addWidget(self.separadorRevision)
-        self.separadorRevision.setVisible(False)
-
-        self.etiquetaRevision = qt.QLabel("Revisión de islas candidatas:")
-        self.etiquetaRevision.setStyleSheet("font-weight: bold;")
-        self.pasoDosLayout.addWidget(self.etiquetaRevision)
-        self.etiquetaRevision.setVisible(False)
-
-        self.etiquetaAyudaRevision = qt.QLabel(
-            "Usá 'Resaltar' para ver cada isla en rojo en el visor 3D.\n"
-            "Si una isla es la camilla u otra estructura que no es cráneo, eliminala.\n"
-            "Las marcadas como 'ALEJADA' no tocan el borde del volumen ni están cerca\n"
-            "de la masa principal: pueden ser hueso real separado por una sutura\n"
-            "abierta, o ruido. Revisalas con atención antes de decidir.\n"
-            "Nada se elimina automáticamente salvo la camilla (toca el borde) y el\n"
-            "ruido de pocos vóxeles: lo que quede acá, si lo confirmás, se conserva.\n"
-            "Cuando estés conforme, presioná 'Confirmar cráneo'."
-        )
-        self.etiquetaAyudaRevision.setWordWrap(True)
-        self.etiquetaAyudaRevision.setStyleSheet("color: gray; font-size: 9px;")
-        self.pasoDosLayout.addWidget(self.etiquetaAyudaRevision)
-        self.etiquetaAyudaRevision.setVisible(False)
-
-        self.contenedorIslas = qt.QWidget()
-        self.layoutIslas = qt.QVBoxLayout(self.contenedorIslas)
-        self.layoutIslas.setContentsMargins(0, 0, 0, 0)
-        self.pasoDosLayout.addWidget(self.contenedorIslas)
-        self.contenedorIslas.setVisible(False)
-
-        self.botonConfirmarCraneo = qt.QPushButton("Confirmar cráneo")
-        self.botonConfirmarCraneo.toolTip = "Fusiona las islas restantes en un único Craneo_Final"
-        self.botonConfirmarCraneo.setStyleSheet(
-            "background-color: #1E7B45; color: white; font-weight: bold; padding: 6px;"
-        )
-        self.pasoDosLayout.addWidget(self.botonConfirmarCraneo)
-        self.botonConfirmarCraneo.setVisible(False)
-        self.botonConfirmarCraneo.connect("clicked(bool)", self.onBotonConfirmarCraneoClicked)
-
-        self.etiquetaEstadoConfirmacion = qt.QLabel("")
-        self.etiquetaEstadoConfirmacion.setWordWrap(True)
-        self.pasoDosLayout.addWidget(self.etiquetaEstadoConfirmacion)
-
-        # -------------------------------------------------------
-        # PASO 3 — Planificar osteotomía
-        # -------------------------------------------------------
-        pasoTresCollapsible = ctk.ctkCollapsibleButton()
-        pasoTresCollapsible.text = "Paso 3 — Planificar osteotomía"
-        self.layout.addWidget(pasoTresCollapsible)
-        pasoTresLayout = qt.QVBoxLayout(pasoTresCollapsible)
-
-        instruccionesPasoTres = qt.QLabel(
-            "Trazá la línea de corte sobre la superficie del cráneo, con clicks "
-            "izquierdos siguiendo el camino deseado.\n"
-            "No hace falta cerrar la línea ni volver al punto inicial: cuando "
-            "termines, presioná directamente 'Finalizar trazado'.\n"
-            "El sistema calcula automáticamente la profundidad necesaria para "
-            "atravesar el hueso en cada punto."
-        )
-        instruccionesPasoTres.setWordWrap(True)
-        pasoTresLayout.addWidget(instruccionesPasoTres)
-
-        self.botonTrazarCorte = qt.QPushButton("Trazar línea de corte")
-        pasoTresLayout.addWidget(self.botonTrazarCorte)
-
-        self.checkCurvaCerrada = qt.QCheckBox("Curva cerrada (para aislar una región de hueso)")
-        self.checkCurvaCerrada.setToolTip(
-            "Sin tildar: línea abierta. Solo separa si sus dos extremos llegan\n"
-            "a un borde real del cráneo (una órbita, el foramen magnum, etc.).\n"
-            "Tildado: lazo cerrado. Aísla siempre la región que encierra,\n"
-            "aunque esté en el medio del hueso, sin tocar ningún borde.\n\n"
-            "Con esta opción tildada, NO cierres el lazo a mano: colocá los\n"
-            "puntos del contorno y frená. El sistema une el último con el\n"
-            "primero automáticamente."
-        )
-        pasoTresLayout.addWidget(self.checkCurvaCerrada)
-
-        self.botonFinalizarTrazado = qt.QPushButton("Finalizar trazado")
-        self.botonFinalizarTrazado.enabled = False  # se activa al entrar en modo trazado
-        pasoTresLayout.addWidget(self.botonFinalizarTrazado)
-
-        filaGrosor = qt.QHBoxLayout()
-        etiquetaGrosor = qt.QLabel("Grosor de la osteotomía (mm):")
-        filaGrosor.addWidget(etiquetaGrosor)
-        self.spinGrosor = qt.QDoubleSpinBox()
-        self.spinGrosor.setRange(0.1, 5.0)
-        self.spinGrosor.setSingleStep(0.1)
-        self.spinGrosor.setValue(1.0)
-        self.spinGrosor.setToolTip(
-            "Ancho de la hoja/sierra real usada en la cirugía.\n"
-            "Valor pendiente de confirmar con el equipo del Garrahan."
-        )
-        filaGrosor.addWidget(self.spinGrosor)
-        pasoTresLayout.addLayout(filaGrosor)
-
-        self.botonGenerarCorte = qt.QPushButton("Generar corte")
-        self.botonGenerarCorte.enabled = False
-        pasoTresLayout.addWidget(self.botonGenerarCorte)
-
-        self.etiquetaEstadoCorte = qt.QLabel("Todavía no se planificó ningún corte.")
-        self.etiquetaEstadoCorte.setWordWrap(True)
-        self.etiquetaEstadoCorte.setStyleSheet("color: gray;")
-        pasoTresLayout.addWidget(self.etiquetaEstadoCorte)
-
-        self.botonTrazarCorte.connect("clicked(bool)", self.onBotonTrazarCorteClicked)
-        self.botonFinalizarTrazado.connect("clicked(bool)", self.onBotonFinalizarTrazadoClicked)
-        self.botonGenerarCorte.connect("clicked(bool)", self.onBotonGenerarCorteClicked)
-
-        # Widget oficial de Slicer para manejar la colocación de puntos.
-        # Se usa "headless" (sin sus botones propios, ocultos) porque ya
-        # tenemos nuestros propios botones en español; solo aprovechamos
-        # su mecanismo interno, que es más confiable que armar a mano la
-        # conexión entre clicks del mouse y el nodo activo.
-        self.placeWidgetCorte = slicer.qSlicerMarkupsPlaceWidget()
-        self.placeWidgetCorte.setMRMLScene(slicer.mrmlScene)
-        self.placeWidgetCorte.buttonsVisible = False
-        pasoTresLayout.addWidget(self.placeWidgetCorte)
-        self.placeWidgetCorte.hide()
-
-        # -------------------------------------------------------
-        # Espacio para próximos pasos (Paso 4)
-        # -------------------------------------------------------
         self.layout.addStretch(1)
 
-        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
-        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
-
+        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent,
+                         self.onSceneStartClose)
+        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent,
+                         self.onSceneEndClose)
         self.initializeParameterNode()
+
+        self._habilitar(self.paso2, False)
+        self._habilitar(self.paso3, False)
+        self._habilitar(self.paso4, False)
+        self._habilitar(self.paso5, False)
+
+    # ---------- helpers de construccion ----------
+    def _titulo(self, texto):
+        etiqueta = qt.QLabel(texto)
+        etiqueta.setStyleSheet("font-weight: bold; margin-top: 4px;")
+        return etiqueta
+
+    def _ayuda(self, texto):
+        etiqueta = qt.QLabel(texto)
+        etiqueta.setWordWrap(True)
+        etiqueta.setStyleSheet("color: #555555;")
+        return etiqueta
+
+    def _estado(self, texto):
+        etiqueta = qt.QLabel(texto)
+        etiqueta.setWordWrap(True)
+        etiqueta.setStyleSheet(GRIS)
+        return etiqueta
+
+    def _separador(self):
+        linea = qt.QFrame()
+        linea.setFrameShape(qt.QFrame.HLine)
+        linea.setStyleSheet("color: #CCCCCC;")
+        return linea
+
+    def _habilitar(self, collapsible, habilitado):
+        collapsible.setEnabled(bool(habilitado))
+        if habilitado:
+            collapsible.collapsed = False
+
+    def _poner(self, etiqueta, texto, estilo=GRIS):
+        etiqueta.setText(texto)
+        etiqueta.setStyleSheet(estilo)
+        slicer.app.processEvents()
+
+    def _esperando(self, etiqueta, texto):
+        self._poner(etiqueta, texto, NARANJA)
+        slicer.app.setOverrideCursor(qt.Qt.WaitCursor)
+        slicer.app.processEvents()
+
+    def _listo(self):
+        slicer.app.restoreOverrideCursor()
+
+    # ========================================================
+    # PASO 1 - CARGAR LA TOMOGRAFIA
+    # ========================================================
+    def _construirPaso1(self):
+        self.paso1 = ctk.ctkCollapsibleButton()
+        self.paso1.text = "Paso 1 - Cargar la tomografia del paciente"
+        self.layout.addWidget(self.paso1)
+        caja = qt.QVBoxLayout(self.paso1)
+
+        caja.addWidget(self._ayuda(
+            "Elegí la carpeta del estudio o el .zip tal cual lo bajaste del "
+            "portal del Garrahan.\n"
+            "El sistema mira todas las series y propone la más apta para "
+            "reconstruir el hueso. Si hiciera falta, la podés cambiar en la "
+            "lista de abajo."))
+
+        fila = qt.QHBoxLayout()
+        self.botonCarpeta = qt.QPushButton("Elegir carpeta...")
+        self.botonCarpeta.setStyleSheet(ESTILO_BOTON_ACCION)
+        self.botonZip = qt.QPushButton("Elegir .zip...")
+        self.botonZip.setStyleSheet(ESTILO_BOTON_ACCION)
+        fila.addWidget(self.botonCarpeta)
+        fila.addWidget(self.botonZip)
+        caja.addLayout(fila)
+
+        self.etiquetaSeries = self._titulo("Serie que se va a usar:")
+        caja.addWidget(self.etiquetaSeries)
+        self.etiquetaSeries.setVisible(False)
+
+        self.comboSeries = qt.QComboBox()
+        self.comboSeries.toolTip = (
+            "Series aptas para segmentar hueso, de mejor a peor.\n"
+            "La primera, marcada con *, es la que el sistema recomienda.")
+        caja.addWidget(self.comboSeries)
+        self.comboSeries.setVisible(False)
+
+        self.botonCargarSerie = qt.QPushButton("Cargar la serie elegida")
+        self.botonCargarSerie.setStyleSheet(ESTILO_BOTON_PRINCIPAL)
+        caja.addWidget(self.botonCargarSerie)
+        self.botonCargarSerie.setVisible(False)
+
+        self.estadoCarga = self._estado("Todavia no se cargo ningun estudio.")
+        caja.addWidget(self.estadoCarga)
+
+        # Las series descartadas y el motivo de cada una. Colapsado: es
+        # informacion de control, no algo que el medico tenga que leer siempre.
+        # Pero cuando el sistema elige mal, esto es lo primero que hay que
+        # mirar, y tenerlo a un click evita ir a buscar la consola de Python.
+        self.detalleSeries = ctk.ctkCollapsibleGroupBox()
+        self.detalleSeries.title = "Ver todas las series del estudio"
+        self.detalleSeries.collapsed = True
+        cajaDetalle = qt.QVBoxLayout(self.detalleSeries)
+        self.textoSeries = qt.QTextEdit()
+        self.textoSeries.setReadOnly(True)
+        self.textoSeries.setMinimumHeight(130)
+        self.textoSeries.setStyleSheet("font-family: monospace; font-size: 11px;")
+        cajaDetalle.addWidget(self.textoSeries)
+        caja.addWidget(self.detalleSeries)
+        self.detalleSeries.setVisible(False)
+
+        self.botonCarpeta.connect("clicked(bool)", self.onSeleccionarCarpeta)
+        self.botonZip.connect("clicked(bool)", self.onSeleccionarZip)
+        self.botonCargarSerie.connect("clicked(bool)", self.onCargarSerie)
+
+    def onSeleccionarCarpeta(self):
+        ruta = qt.QFileDialog.getExistingDirectory(
+            self.parent, "Elegí la carpeta del estudio DICOM")
+        if ruta:
+            self._analizarEstudio(ruta)
+
+    def onSeleccionarZip(self):
+        ruta = qt.QFileDialog.getOpenFileName(
+            self.parent, "Elegí el .zip del estudio", "", "Archivos ZIP (*.zip)")
+        if ruta:
+            self._analizarEstudio(ruta)
+
+    def _analizarEstudio(self, ruta):
+        self._esperando(self.estadoCarga,
+                        "Leyendo el estudio. Con un .zip grande esto tarda un "
+                        "rato...")
+        try:
+            resultado = self.logic.analizarEstudio(ruta)
+        finally:
+            self._listo()
+
+        if not resultado or not resultado.get("ordenadas"):
+            self.comboSeries.setVisible(False)
+            self.etiquetaSeries.setVisible(False)
+            self.botonCargarSerie.setVisible(False)
+            if resultado:
+                self._mostrarListaDeSeries(resultado)
+            self._poner(self.estadoCarga,
+                        "No encontré ninguna serie volumétrica apta en esa "
+                        "carpeta.\nAbrí 'Ver todas las series del estudio': ahí "
+                        "está el motivo por el que se descartó cada una.", ROJO)
+            return
+
+        self._seriesOrdenadas = resultado["ordenadas"]
+        self.comboSeries.clear()
+        for i, s in enumerate(self._seriesOrdenadas):
+            self.comboSeries.addItem(BloqueC.etiquetaDeSerie(s, recomendada=(i == 0)))
+        self.comboSeries.setCurrentIndex(0)
+
+        self.etiquetaSeries.setVisible(True)
+        self.comboSeries.setVisible(True)
+        self.botonCargarSerie.setVisible(True)
+        self._mostrarListaDeSeries(resultado)
+
+        primera = self._seriesOrdenadas[0]
+        nombre = primera["series_desc"] or ("n#%s" % primera["series_num"])
+        empatadas = resultado.get("empatadas") or []
+
+        if empatadas:
+            # El algoritmo no puede desempatar dos reconstrucciones del mismo
+            # protocolo. En vez de elegir una callado, lo dice.
+            self._poner(self.estadoCarga,
+                        "Hay %d series con el mismo nombre y casi la misma "
+                        "cantidad de cortes. No puedo saber cuál querés: "
+                        "elegí vos en la lista de arriba y presíoná 'Cargar la "
+                        "serie elegida'." % len(empatadas), AMBAR)
+            return
+
+        aviso = ""
+        if resultado["nEstudios"] > 1:
+            aviso += ("\nOJO: la carpeta tiene %d estudios de fechas distintas. "
+                      "Verificá en la lista que la serie sea la del estudio "
+                      "correcto." % resultado["nEstudios"])
+        if resultado["nPacientes"] > 1:
+            aviso += ("\nOJO: hay %d pacientes distintos en la carpeta."
+                      % resultado["nPacientes"])
+
+        self._poner(self.estadoCarga,
+                    "%d serie(s) apta(s). Recomendada: %s\n(%s)%s\n"
+                    "Revisá y presíoná 'Cargar la serie elegida'."
+                    % (len(self._seriesOrdenadas), nombre, primera["razon"], aviso),
+                    AMBAR if aviso else AZUL)
+
+    def onCargarSerie(self):
+        idx = self.comboSeries.currentIndex
+        if idx < 0 or idx >= len(self._seriesOrdenadas):
+            return
+        serie = self._seriesOrdenadas[idx]
+
+        self._esperando(self.estadoCarga, "Cargando la serie, esperá...")
+        try:
+            volumen = self.logic.cargarSerie(serie["series_uid"])
+        finally:
+            self._listo()
+
+        if volumen is None:
+            self._poner(self.estadoCarga,
+                        "No se pudo cargar esa serie. Mirá el detalle técnico "
+                        "de abajo.", ROJO)
+            return
+
+        self._parameterNode.estudioCargado = volumen
+        self._poner(self.estadoCarga,
+                    "Cargado: %s\n(%s)" % (volumen.GetName(), serie["razon"]),
+                    VERDE if serie.get("esHueso") else AMBAR)
+
+        self._habilitar(self.paso2, True)
+        self._poner(self.estadoCraneo, "Todo listo para generar el craneo.", GRIS)
+
+    def _mostrarListaDeSeries(self, resultado):
+        """Tabla de control: que series había y por que se descarto cada una."""
+        lineas = ["%-4s %-38s %6s %8s  %s"
+                  % ("n#", "SERIE", "CORTES", "PASO mm", "ESTADO")]
+        for i, s in enumerate(resultado.get("ordenadas", [])):
+            sp = "%.2f" % s["spacing_z_real"] if s.get("spacing_z_real") else "?"
+            estado = ("ELEGIDA - " + s["razon"]) if i == 0 else s["razon"]
+            lineas.append("%-4s %-38s %6d %8s  %s"
+                          % (s.get("series_num", "?"),
+                             (s.get("series_desc") or "")[:38],
+                             s.get("n_imagenes", 0), sp, estado))
+        descartadas = resultado.get("descartadas", [])
+        if descartadas:
+            lineas.append("")
+            lineas.append("DESCARTADAS:")
+            for s in descartadas:
+                lineas.append("%-4s %-38s %6d %8s  %s"
+                              % (s.get("series_num", "?"),
+                                 (s.get("series_desc") or "")[:38],
+                                 s.get("n_imagenes", 0), "-",
+                                 s.get("motivo", "")))
+        self.textoSeries.setPlainText("\n".join(lineas))
+        self.detalleSeries.setVisible(True)
+
+
+    # ========================================================
+    # PASO 2 - GENERAR EL CRANEO 3D
+    # ========================================================
+    def _construirPaso2(self):
+        self.paso2 = ctk.ctkCollapsibleButton()
+        self.paso2.text = "Paso 2 - Generar el craneo en 3D"
+        self.layout.addWidget(self.paso2)
+        caja = qt.QVBoxLayout(self.paso2)
+
+        caja.addWidget(self._ayuda(
+            "El sistema separa el hueso del resto de la imagen y arma el modelo "
+            "3D. Despues te muestra las piezas que encontro para que revises si "
+            "alguna no corresponde (una vertebra, el chupete, la camilla)."))
+
+        self.checkPostop = qt.QCheckBox(
+            "El paciente ya fue operado (tomografia postoperatoria)")
+        self.checkPostop.toolTip = (
+            "En un craneo ya operado los colgajos estan separados varios "
+            "milimetros. Con esta opcion tildada el sistema los acepta igual, "
+            "pero entran tambien las vertebras: hay que revisar todo.")
+        caja.addWidget(self.checkPostop)
+
+        self.botonGenerar = qt.QPushButton("Generar el craneo 3D")
+        self.botonGenerar.setStyleSheet(ESTILO_BOTON_ACCION)
+        caja.addWidget(self.botonGenerar)
+
+        self.estadoCraneo = self._estado("Todavia no se genero el craneo.")
+        caja.addWidget(self.estadoCraneo)
+
+        # --- panel de revision ---
+        self.panelRevision = qt.QWidget()
+        cajaRev = qt.QVBoxLayout(self.panelRevision)
+        cajaRev.setContentsMargins(0, 6, 0, 0)
+        cajaRev.addWidget(self._separador())
+        cajaRev.addWidget(self._titulo("Revisá las piezas encontradas"))
+        cajaRev.addWidget(self._ayuda(
+            "Verde = el sistema esta seguro de que es craneo.\n"
+            "Naranja = no esta seguro: miralas con 'Ver' y quitá las que no "
+            "sean hueso del craneo (las vertebras del cuello son las mas "
+            "frecuentes).\n"
+            "Si la pieza principal esta mal elegida, marcá otra con 'Es la "
+            "principal'."))
+
+        filaBotones = qt.QHBoxLayout()
+        self.botonSoloDudosas = qt.QPushButton("Ver solo las dudosas")
+        self.botonVerTodas = qt.QPushButton("Ver todas")
+        self.botonQuitarDudosas = qt.QPushButton("Quitar todas las dudosas")
+        self.botonQuitarDudosas.setStyleSheet(ESTILO_BOTON_QUITAR)
+        for b in (self.botonSoloDudosas, self.botonVerTodas, self.botonQuitarDudosas):
+            filaBotones.addWidget(b)
+        cajaRev.addLayout(filaBotones)
+
+        self.contenedorPiezas = qt.QWidget()
+        self.layoutPiezas = qt.QVBoxLayout(self.contenedorPiezas)
+        self.layoutPiezas.setContentsMargins(0, 0, 0, 0)
+        cajaRev.addWidget(self.contenedorPiezas)
+
+        self.botonConfirmar = qt.QPushButton(
+            "Confirmar el craneo y crear el modelo 3D")
+        self.botonConfirmar.setStyleSheet(ESTILO_BOTON_PRINCIPAL)
+        self.botonConfirmar.toolTip = (
+            "Une las piezas que quedaron en un solo craneo y genera la malla 3D "
+            "sobre la que se van a trazar los cortes")
+        cajaRev.addWidget(self.botonConfirmar)
+
+        caja.addWidget(self.panelRevision)
+        self.panelRevision.setVisible(False)
+
+        self.estadoConfirmacion = self._estado("")
+        caja.addWidget(self.estadoConfirmacion)
+
+        self.botonGenerar.connect("clicked(bool)", self.onGenerarCraneo)
+        self.checkPostop.connect("toggled(bool)", self.onCambiarModoPostop)
+        self.botonSoloDudosas.connect("clicked(bool)", self.onVerSoloDudosas)
+        self.botonVerTodas.connect("clicked(bool)", self.onVerTodas)
+        self.botonQuitarDudosas.connect("clicked(bool)", self.onQuitarDudosas)
+        self.botonConfirmar.connect("clicked(bool)", self.onConfirmarCraneo)
+
+    def onGenerarCraneo(self):
+        volumen = self._parameterNode.estudioCargado
+        if volumen is None:
+            self._poner(self.estadoCraneo,
+                        "Primero hay que cargar la tomografia (Paso 1).", ROJO)
+            return
+
+        self._esperando(self.estadoCraneo,
+                        "Generando el craneo. Esto tarda entre 30 segundos y "
+                        "dos minutos segun el tamano del estudio...")
+        try:
+            piezas = self.logic.generarCraneo(volumen,
+                                              self.checkPostop.checked)
+        finally:
+            self._listo()
+
+        if not piezas:
+            self._poner(self.estadoCraneo,
+                        "No se pudo generar el craneo con esta serie. Fijate de "
+                        "haber cargado la serie correcta.", ROJO)
+            return
+
+        self._construirPanelPiezas(piezas)
+        nDudosas = sum(1 for p in piezas if p["zona"] == "DUDOSA")
+        avisos = self.logic.bloqueA.avisos
+
+        texto = "Se encontraron %d pieza(s): %d segura(s) y %d dudosa(s)." % (
+            len(piezas), len(piezas) - nDudosas, nDudosas)
+        if avisos:
+            texto += "\n\n" + "\n".join("- " + a for a in avisos)
+        self._poner(self.estadoCraneo, texto, AMBAR if avisos else AZUL)
+        self.panelRevision.setVisible(True)
+
+    def onCambiarModoPostop(self, activado):
+        """Si ya se genero el craneo, cambiar el modo rehace la revision sin
+        volver a segmentar (la parte lenta ya esta hecha). Sin esto, tildar la
+        casilla despues de generar no hacia nada y el medico creia que si."""
+        if not self.logic.bloqueA.filas:
+            return
+        self._esperando(self.estadoCraneo, "Rehaciendo la revision...")
+        try:
+            piezas = self.logic.bloqueA.redecidir(modoPostop=bool(activado))
+        finally:
+            self._listo()
+        if not piezas:
+            return
+        self._construirPanelPiezas(piezas)
+        nDudosas = sum(1 for p in piezas if p["zona"] == "DUDOSA")
+        self._poner(self.estadoCraneo,
+                    "Revision rehecha en modo %s: %d pieza(s), %d dudosa(s).%s"
+                    % ("POSTOPERATORIO" if activado else "preoperatorio",
+                       len(piezas), nDudosas,
+                       "\nEn postoperatorio entran tambien las vertebras: hay "
+                       "que revisar todo antes de confirmar." if activado else ""),
+                    AMBAR if activado else AZUL)
+
+    def _construirPanelPiezas(self, piezas):
+        while self.layoutPiezas.count():
+            item = self.layoutPiezas.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._filasPiezas = []
+
+        for p in piezas:
+            fila = qt.QWidget()
+            cajaFila = qt.QHBoxLayout(fila)
+            cajaFila.setContentsMargins(0, 2, 0, 2)
+
+            esDudosa = p["zona"] == "DUDOSA"
+            texto = "Pieza %d   %.1f cm3" % (p["numero"], p["vol"])
+            if p["referencia"]:
+                texto += "   - PIEZA PRINCIPAL"
+            elif p["distRef"] is not None:
+                texto += "   a %.1f mm del craneo" % p["distRef"]
+            if esDudosa and p["nota"]:
+                texto += "\n      %s" % p["nota"]
+
+            etiqueta = qt.QLabel(texto)
+            etiqueta.setWordWrap(True)
+            if p["referencia"]:
+                etiqueta.setStyleSheet("font-size: 11px; font-weight: bold;")
+            elif esDudosa:
+                etiqueta.setStyleSheet("font-size: 11px; color: #B8860B;")
+            else:
+                etiqueta.setStyleSheet("font-size: 11px;")
+            # OJO: en Slicer 5.10 el factor de stretch va POSICIONAL.
+            # Pasarlo como kwarg (stretch=3) falla en runtime.
+            cajaFila.addWidget(etiqueta, 3)
+
+            botonVer = qt.QPushButton("Ver")
+            botonVer.setFixedWidth(55)
+            botonVer.toolTip = "Pinta esta pieza de rojo en la vista 3D"
+            cajaFila.addWidget(botonVer)
+
+            botonPrincipal = qt.QPushButton("Es la principal")
+            botonPrincipal.setFixedWidth(105)
+            botonPrincipal.toolTip = (
+                "Rehace la revision tomando esta pieza como el craneo. Usalo si "
+                "el sistema eligio mal.")
+            botonPrincipal.setEnabled(not p["referencia"])
+            cajaFila.addWidget(botonPrincipal)
+
+            botonQuitar = qt.QPushButton("Quitar")
+            botonQuitar.setFixedWidth(60)
+            botonQuitar.setStyleSheet(ESTILO_BOTON_QUITAR)
+            botonQuitar.setEnabled(not p["referencia"])
+            cajaFila.addWidget(botonQuitar)
+
+            self.layoutPiezas.addWidget(fila)
+            self._filasPiezas.append({"numero": p["numero"], "widget": fila})
+
+            botonVer.connect("clicked(bool)",
+                             lambda _c, n=p["numero"]: self.onVerPieza(n))
+            botonPrincipal.connect("clicked(bool)",
+                                   lambda _c, n=p["numero"]: self.onHacerPrincipal(n))
+            botonQuitar.connect("clicked(bool)",
+                                lambda _c, n=p["numero"]: self.onQuitarPieza(n))
+
+    def onVerPieza(self, numero):
+        self.logic.bloqueA.resaltar(numero)
+
+    def onVerTodas(self):
+        self.logic.bloqueA.mostrarTodas()
+
+    def onVerSoloDudosas(self):
+        n = self.logic.bloqueA.soloDudosas()
+        self._poner(self.estadoCraneo,
+                    "Quedaron a la vista %d pieza(s) dudosa(s)." % n, AZUL)
+
+    def onQuitarPieza(self, numero):
+        if not self.logic.bloqueA.eliminar(numero):
+            return
+        fila = next((f for f in self._filasPiezas if f["numero"] == numero), None)
+        if fila:
+            fila["widget"].setVisible(False)
+            self._filasPiezas = [f for f in self._filasPiezas
+                                 if f["numero"] != numero]
+        self._poner(self.estadoCraneo,
+                    "Pieza %d quitada. Quedan %d."
+                    % (numero, len(self.logic.bloqueA.piezas)), AZUL)
+
+    def onQuitarDudosas(self):
+        n = self.logic.bloqueA.eliminarDudosas()
+        self._construirPanelPiezas(self.logic.bloqueA.piezas)
+        self._poner(self.estadoCraneo,
+                    "Se quitaron %d pieza(s) dudosa(s)." % n, AZUL)
+
+    def onHacerPrincipal(self, numero):
+        self._esperando(self.estadoCraneo, "Rehaciendo la revision...")
+        try:
+            piezas = self.logic.cambiarPiezaPrincipal(numero)
+        finally:
+            self._listo()
+        if not piezas:
+            self._poner(self.estadoCraneo,
+                        "No se pudo usar esa pieza como principal.", ROJO)
+            return
+        self._construirPanelPiezas(piezas)
+        nDudosas = sum(1 for p in piezas if p["zona"] == "DUDOSA")
+        self._poner(self.estadoCraneo,
+                    "Revision rehecha con la pieza %d como craneo: %d pieza(s), "
+                    "%d dudosa(s)." % (numero, len(piezas), nDudosas), AZUL)
+
+    def onConfirmarCraneo(self):
+        if not self.logic.bloqueA.piezas:
+            self._poner(self.estadoConfirmacion,
+                        "No queda ninguna pieza. Volvé a generar el craneo.", ROJO)
+            return
+
+        self._esperando(self.estadoConfirmacion,
+                        "Uniendo las piezas y armando el modelo 3D...")
+        try:
+            resultado = self.logic.confirmarCraneo()
+        finally:
+            self._listo()
+
+        if resultado is None:
+            self._poner(self.estadoConfirmacion,
+                        "No se pudo confirmar el craneo. Mirá el detalle de "
+                        "abajo.", ROJO)
+            return
+
+        texto = ("Craneo confirmado: %.1f cm3 de hueso, en %d pieza(s) "
+                 "separadas.\nYa podés trazar los cortes."
+                 % (resultado["volumenCM3"], resultado["piezasConexas"]))
+        if resultado["piezasConexas"] > 1:
+            texto += ("\nQue venga en varias piezas es normal en un craneo "
+                      "pediatrico: son las suturas todavia abiertas. El corte "
+                      "las tiene en cuenta y no las confunde con fragmentos.")
+        self._poner(self.estadoConfirmacion, texto, VERDE)
+
+        self.panelRevision.setVisible(False)
+        self._habilitar(self.paso3, True)
+        self.paso2.collapsed = True
+        self._resetearVista3D()
+
+    # ========================================================
+    # PASO 3 - TRAZAR Y HACER LOS CORTES
+    # ========================================================
+    def _construirPaso3(self):
+        self.paso3 = ctk.ctkCollapsibleButton()
+        self.paso3.text = "Paso 3 - Planificar y hacer los cortes"
+        self.layout.addWidget(self.paso3)
+        caja = qt.QVBoxLayout(self.paso3)
+
+        caja.addWidget(self._ayuda(
+            "Trazá cada osteotomia como una linea sobre el craneo, en la vista "
+            "3D: hacé click en el punto donde empieza el corte, seguí con "
+            "clicks a lo largo del recorrido, y cuando llegues al final apretá "
+            "'Terminar esta linea'.\n"
+            "El corte entra siempre perpendicular al hueso, con la profundidad "
+            "justa para atravesarlo. Podés trazar todas las lineas que "
+            "necesites antes de cortar."))
+
+        self.botonTrazar = qt.QPushButton("Trazar una linea de corte")
+        self.botonTrazar.setStyleSheet(ESTILO_BOTON_ACCION)
+        caja.addWidget(self.botonTrazar)
+
+        self.botonTerminarLinea = qt.QPushButton("Terminar esta linea")
+        self.botonTerminarLinea.setEnabled(False)
+        caja.addWidget(self.botonTerminarLinea)
+
+        self.estadoTrazado = self._estado("Todavia no trazaste ninguna linea.")
+        caja.addWidget(self.estadoTrazado)
+
+        self.contenedorLineas = qt.QWidget()
+        self.layoutLineas = qt.QVBoxLayout(self.contenedorLineas)
+        self.layoutLineas.setContentsMargins(0, 0, 0, 0)
+        caja.addWidget(self.contenedorLineas)
+
+        caja.addWidget(self._separador())
+
+        filaGrosor = qt.QHBoxLayout()
+        filaGrosor.addWidget(qt.QLabel("Ancho de la sierra (mm):"))
+        self.spinGrosor = qt.QDoubleSpinBox()
+        self.spinGrosor.setRange(0.3, 5.0)
+        self.spinGrosor.setSingleStep(0.1)
+        self.spinGrosor.setValue(BloqueF.GROSOR_CORTE_MM)
+        self.spinGrosor.toolTip = (
+            "Ancho real de la ranura que deja la sierra en el hueso. El valor "
+            "por defecto es 1.2 mm; confirmalo con el equipo del Garrahan.")
+        filaGrosor.addWidget(self.spinGrosor)
+        filaGrosor.addStretch(1)
+        caja.addLayout(filaGrosor)
+
+        self.botonPrevisualizar = qt.QPushButton(
+            "Previsualizar los cortes (no corta nada)")
+        self.botonPrevisualizar.toolTip = (
+            "Dibuja, punto por punto, hasta donde llega el corte. Azul: "
+            "atraviesa el hueso de lado a lado. Rojo: se queda adentro y ahi el "
+            "hueso NO se va a separar.")
+        caja.addWidget(self.botonPrevisualizar)
+
+        self.botonOcultarPrevia = qt.QPushButton("Ocultar la previsualizacion")
+        self.botonOcultarPrevia.setVisible(False)
+        caja.addWidget(self.botonOcultarPrevia)
+
+        self.botonCortar = qt.QPushButton("Hacer los cortes")
+        self.botonCortar.setStyleSheet(ESTILO_BOTON_PRINCIPAL)
+        self.botonCortar.setEnabled(False)
+        caja.addWidget(self.botonCortar)
+
+        self.estadoCorte = self._estado("")
+        caja.addWidget(self.estadoCorte)
+
+        # El widget oficial de Slicer para colocar puntos. Se usa oculto,
+        # aprovechando solo su mecanismo interno: es mas confiable que conectar
+        # a mano los clicks del mouse con el nodo activo.
+        self.placeWidget = slicer.qSlicerMarkupsPlaceWidget()
+        self.placeWidget.setMRMLScene(slicer.mrmlScene)
+        self.placeWidget.buttonsVisible = False
+        caja.addWidget(self.placeWidget)
+        self.placeWidget.hide()
+
+        self.botonTrazar.connect("clicked(bool)", self.onTrazarLinea)
+        self.botonTerminarLinea.connect("clicked(bool)", self.onTerminarLinea)
+        self.botonPrevisualizar.connect("clicked(bool)", self.onPrevisualizar)
+        self.botonOcultarPrevia.connect("clicked(bool)", self.onOcultarPrevia)
+        self.botonCortar.connect("clicked(bool)", self.onCortar)
+
+    def onTrazarLinea(self):
+        self._quitarObservadorCurva()
+        curva = self.logic.nuevaCurvaDeCorte(len(self._curvas) + 1)
+        self._curvaEnCurso = curva
+        self._observadorCurva = curva.AddObserver(
+            slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent,
+            self._onPuntoColocado)
+        self.placeWidget.setCurrentNode(curva)
+        self.placeWidget.setPlaceModePersistency(True)
+        self.placeWidget.setPlaceModeEnabled(True)
+        self.botonTerminarLinea.setEnabled(True)
+        self.botonTrazar.setEnabled(False)
+        self._poner(self.estadoTrazado,
+                    "Hacé click sobre el craneo en la vista 3D para ir marcando "
+                    "el recorrido del corte. Puntos colocados: 0.", NARANJA)
+
+    def _onPuntoColocado(self, caller, event):
+        if self._curvaEnCurso is None:
+            return
+        n = self._curvaEnCurso.GetNumberOfControlPoints()
+        self._poner(self.estadoTrazado,
+                    "Puntos colocados: %d. Cuando llegues al final del corte, "
+                    "apretá 'Terminar esta linea'." % n, NARANJA)
+
+    def _quitarObservadorCurva(self):
+        if self._observadorCurva is not None and self._curvaEnCurso is not None:
+            try:
+                self._curvaEnCurso.RemoveObserver(self._observadorCurva)
+            except Exception:
+                pass
+        self._observadorCurva = None
+
+    def onTerminarLinea(self):
+        self.placeWidget.setPlaceModeEnabled(False)
+        self._quitarObservadorCurva()
+        curva = self._curvaEnCurso
+        self.botonTerminarLinea.setEnabled(False)
+        self.botonTrazar.setEnabled(True)
+
+        n = 0 if curva is None else curva.GetNumberOfControlPoints()
+        if n < 2:
+            if curva is not None:
+                slicer.mrmlScene.RemoveNode(curva)
+            self._curvaEnCurso = None
+            self._poner(self.estadoTrazado,
+                        "La linea necesita al menos 2 puntos (colocaste %d). "
+                        "Probá de nuevo." % n, ROJO)
+            return
+
+        self._curvas.append(curva)
+        self._curvaEnCurso = None
+        self._construirPanelLineas()
+        self.botonCortar.setEnabled(True)
+        self._poner(self.estadoTrazado,
+                    "Linea guardada con %d puntos. Ya tenés %d linea(s). Podés "
+                    "trazar otra o pasar a cortar."
+                    % (n, len(self._curvas)), AZUL)
+
+    def _construirPanelLineas(self):
+        while self.layoutLineas.count():
+            item = self.layoutLineas.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for curva in list(self._curvas):
+            fila = qt.QWidget()
+            cajaFila = qt.QHBoxLayout(fila)
+            cajaFila.setContentsMargins(0, 2, 0, 2)
+            etiqueta = qt.QLabel("%s   -   %d puntos"
+                                 % (curva.GetName(),
+                                    curva.GetNumberOfControlPoints()))
+            etiqueta.setStyleSheet("font-size: 11px;")
+            cajaFila.addWidget(etiqueta, 3)
+
+            botonVer = qt.QPushButton("Ver")
+            botonVer.setFixedWidth(55)
+            cajaFila.addWidget(botonVer)
+
+            botonBorrar = qt.QPushButton("Borrar")
+            botonBorrar.setFixedWidth(60)
+            botonBorrar.setStyleSheet(ESTILO_BOTON_QUITAR)
+            cajaFila.addWidget(botonBorrar)
+
+            self.layoutLineas.addWidget(fila)
+            botonVer.connect("clicked(bool)",
+                             lambda _c, c=curva: self.onVerLinea(c))
+            botonBorrar.connect("clicked(bool)",
+                                lambda _c, c=curva: self.onBorrarLinea(c))
+
+    def onVerLinea(self, curva):
+        for c in self._curvas:
+            d = c.GetDisplayNode()
+            if d is None:
+                continue
+            if c is curva:
+                d.SetSelectedColor(1.0, 1.0, 0.0)
+                d.SetColor(1.0, 1.0, 0.0)
+                d.SetLineThickness(1.0)
+            else:
+                d.SetSelectedColor(1.0, 0.2, 0.2)
+                d.SetColor(1.0, 0.4, 0.4)
+                d.SetLineThickness(0.5)
+
+    def onBorrarLinea(self, curva):
+        nombre = curva.GetName()
+        self._curvas = [c for c in self._curvas if c is not curva]
+        try:
+            slicer.mrmlScene.RemoveNode(curva)
+        except Exception:
+            pass
+        self._construirPanelLineas()
+        self.botonCortar.setEnabled(bool(self._curvas))
+        self._poner(self.estadoTrazado,
+                    "Se borro %s. Quedan %d linea(s)."
+                    % (nombre, len(self._curvas)), AZUL)
+
+    def onPrevisualizar(self):
+        if not self._curvas:
+            self._poner(self.estadoCorte,
+                        "Primero trazá al menos una linea de corte.", ROJO)
+            return
+        self._esperando(self.estadoCorte,
+                        "Calculando la previsualizacion, esperá...")
+        try:
+            resultado = self.logic.previsualizarCortes(self.spinGrosor.value)
+        finally:
+            self._listo()
+
+        if resultado is None:
+            self._poner(self.estadoCorte,
+                        "No se pudo calcular la previsualizacion. Mirá el "
+                        "detalle de abajo.", ROJO)
+            return
+
+        lineas = ["Previsualizacion lista. En la vista 3D:",
+                  "   AZUL = el corte atraviesa el hueso de lado a lado.",
+                  "   ROJO = el corte se queda adentro y ahi NO se va a separar.",
+                  ""]
+        problemas = False
+        for c in resultado["curvas"]:
+            if c.get("error"):
+                lineas.append("- %s: %s" % (c["nombre"], c["error"]))
+                problemas = True
+                continue
+            pct = 100.0 * (c["nPuntos"] - c["nNoAtraviesa"]) / max(c["nPuntos"], 1)
+            lineas.append("- %s: atraviesa en el %.0f%% del recorrido, hueso de "
+                          "%.1f mm de espesor"
+                          % (c["nombre"], pct, c["espesorMediano"]))
+            if c["nNoAtraviesa"]:
+                problemas = True
+                lineas.append("     %d punto(s) en rojo: ahi la perpendicular al "
+                              "hueso corre a lo largo de la placa (tipico detras "
+                              "de los ojos). Si ese tramo tiene que separarse, "
+                              "trazá una linea extra sobre la cara por la que si "
+                              "se puede entrar." % c["nNoAtraviesa"])
+        self._poner(self.estadoCorte, "\n".join(lineas),
+                    AMBAR if problemas else VERDE)
+        self.botonOcultarPrevia.setVisible(True)
+
+    def onOcultarPrevia(self):
+        self.logic.ocultarPrevisualizacion()
+        self.botonOcultarPrevia.setVisible(False)
+
+    def onCortar(self):
+        if not self._curvas:
+            self._poner(self.estadoCorte,
+                        "Primero trazá al menos una linea de corte.", ROJO)
+            return
+        self._esperando(self.estadoCorte,
+                        "Haciendo los cortes. Esto puede tardar un par de "
+                        "minutos...")
+        try:
+            resultado = self.logic.cortar(self.spinGrosor.value)
+        finally:
+            self._listo()
+
+        if resultado is None:
+            self._poner(self.estadoCorte,
+                        "No se pudo hacer el corte. Mirá el detalle de abajo.",
+                        ROJO)
+            return
+
+        lineas = ["Cortes realizados: quedaron %d pieza(s), %d listas para "
+                  "imprimir." % (resultado["total"], resultado["watertight"])]
+        for p in resultado["piezas"]:
+            lineas.append("   %-22s %6.1f cm3%s"
+                          % (p["nombre"], p["volumenCM3"],
+                             "" if p["watertight"] else "   (malla abierta)"))
+        if resultado["noSepararon"]:
+            lineas.append("")
+            lineas.append("ATENCION: %d corte(s) quedaron marcados pero NO "
+                          "separaron el hueso: %s. Mirá los puntos rojos de la "
+                          "previsualizacion y agregá una linea por la otra cara."
+                          % (len(resultado["noSepararon"]),
+                             ", ".join(resultado["noSepararon"])))
+        self._poner(self.estadoCorte, "\n".join(lineas),
+                    AMBAR if resultado["noSepararon"] else VERDE)
+
+        self._habilitar(self.paso4, True)
+        self._habilitar(self.paso5, True)
+        self.paso5.collapsed = True
+        self.paso3.collapsed = True
+        self._resetearVista3D()
+
+    # ========================================================
+    # PASO 4 - REACOMODAR LAS PIEZAS
+    # ========================================================
+    def _construirPaso4(self):
+        self.paso4 = ctk.ctkCollapsibleButton()
+        self.paso4.text = "Paso 4 - Reacomodar las piezas"
+        self.layout.addWidget(self.paso4)
+        caja = qt.QVBoxLayout(self.paso4)
+
+        caja.addWidget(self._ayuda(
+            "Ahora se rearma la boveda. La base del craneo queda fija (es la "
+            "referencia de toda la cirugia) y el resto de las piezas se mueven "
+            "respecto de ella. Podés arrastrarlas con el mouse o moverlas con "
+            "valores exactos en milimetros."))
+
+        self.botonPrepararPiezas = qt.QPushButton("Preparar las piezas")
+        self.botonPrepararPiezas.setStyleSheet(ESTILO_BOTON_ACCION)
+        caja.addWidget(self.botonPrepararPiezas)
+
+        self.estadoPiezas = self._estado("Todavia no se prepararon las piezas.")
+        caja.addWidget(self.estadoPiezas)
+
+        self.contenedorFragmentos = qt.QWidget()
+        self.layoutFragmentos = qt.QVBoxLayout(self.contenedorFragmentos)
+        self.layoutFragmentos.setContentsMargins(0, 0, 0, 0)
+        caja.addWidget(self.contenedorFragmentos)
+
+        # --- controles de la pieza elegida ---
+        self.panelMovimiento = qt.QWidget()
+        cajaMov = qt.QVBoxLayout(self.panelMovimiento)
+        cajaMov.setContentsMargins(0, 6, 0, 0)
+        cajaMov.addWidget(self._separador())
+        self.etiquetaPiezaActiva = self._titulo("Ninguna pieza seleccionada")
+        cajaMov.addWidget(self.etiquetaPiezaActiva)
+        cajaMov.addWidget(self._ayuda(
+            "'Mover con el mouse' enciende las flechas y los aros sobre la "
+            "pieza en la vista 3D. Los botones de abajo hacen lo mismo con "
+            "valores exactos."))
+
+        filaPaso = qt.QHBoxLayout()
+        filaPaso.addWidget(qt.QLabel("Mover de a (mm):"))
+        self.spinPasoMM = qt.QDoubleSpinBox()
+        self.spinPasoMM.setRange(0.5, 30.0)
+        self.spinPasoMM.setSingleStep(0.5)
+        self.spinPasoMM.setValue(2.0)
+        filaPaso.addWidget(self.spinPasoMM)
+        filaPaso.addWidget(qt.QLabel("   Girar de a (grados):"))
+        self.spinPasoGrados = qt.QDoubleSpinBox()
+        self.spinPasoGrados.setRange(1.0, 90.0)
+        self.spinPasoGrados.setSingleStep(1.0)
+        self.spinPasoGrados.setValue(5.0)
+        filaPaso.addWidget(self.spinPasoGrados)
+        filaPaso.addStretch(1)
+        cajaMov.addLayout(filaPaso)
+
+        # Traslaciones, con los nombres anatomicos escritos como los dice el
+        # cirujano y no como ejes RAS. dr = derecha, da = adelante, ds = arriba.
+        filaMover = qt.QHBoxLayout()
+        filaMover.addWidget(qt.QLabel("Mover:"))
+        for texto, eje, signo in (("Izquierda", "dr", -1), ("Derecha", "dr", 1),
+                                  ("Adelante", "da", 1), ("Atras", "da", -1),
+                                  ("Arriba", "ds", 1), ("Abajo", "ds", -1)):
+            b = qt.QPushButton(texto)
+            b.setFixedWidth(78)
+            filaMover.addWidget(b)
+            b.connect("clicked(bool)",
+                      lambda _c, e=eje, s=signo: self.onMoverPieza(e, s))
+        cajaMov.addLayout(filaMover)
+
+        filaGiro = qt.QHBoxLayout()
+        filaGiro.addWidget(qt.QLabel("Girar:"))
+        for texto, eje, signo in (("Cabeceo +", "LR", 1), ("Cabeceo -", "LR", -1),
+                                  ("Rolido +", "AP", 1), ("Rolido -", "AP", -1),
+                                  ("Guinada +", "SI", 1), ("Guinada -", "SI", -1)):
+            b = qt.QPushButton(texto)
+            b.setFixedWidth(78)
+            filaGiro.addWidget(b)
+            b.connect("clicked(bool)",
+                      lambda _c, e=eje, s=signo: self.onGirarPieza(e, s))
+        cajaMov.addLayout(filaGiro)
+
+        filaEspecial = qt.QHBoxLayout()
+        self.botonVoltear = qt.QPushButton("Dar vuelta 180 (adelante <-> atras)")
+        self.botonVoltear.toolTip = (
+            "Gira la pieza media vuelta, como cuando se pasa una placa de "
+            "occipital a frontal. No es un espejo: el hueso no se puede "
+            "reflejar, se voltea.")
+        filaEspecial.addWidget(self.botonVoltear)
+        self.botonAjustarAlMolde = qt.QPushButton("Acercar al molde")
+        self.botonAjustarAlMolde.toolTip = (
+            "Apoya la pieza sobre el casquete objetivo. Es una posicion de "
+            "arranque: despues hay que ajustar a mano.")
+        filaEspecial.addWidget(self.botonAjustarAlMolde)
+        cajaMov.addLayout(filaEspecial)
+
+        caja.addWidget(self.panelMovimiento)
+        self.panelMovimiento.setVisible(False)
+
+        caja.addWidget(self._separador())
+
+        filaMolde = qt.QHBoxLayout()
+        filaMolde.addWidget(qt.QLabel("Indice cefalico objetivo:"))
+        self.spinIC = qt.QDoubleSpinBox()
+        self.spinIC.setRange(60.0, 95.0)
+        self.spinIC.setSingleStep(0.5)
+        self.spinIC.setValue(BloqueG.IC_OBJETIVO)
+        self.spinIC.toolTip = ("Un craneo normal esta entre 76 y 81. En "
+                               "escafocefalia el indice es mucho mas bajo.")
+        filaMolde.addWidget(self.spinIC)
+        self.botonMolde = qt.QPushButton("Mostrar el craneo objetivo")
+        self.botonMolde.toolTip = (
+            "Dibuja un casquete semitransparente con la forma a la que hay que "
+            "llegar, como el molde blanco que usan en el quirofano.")
+        filaMolde.addWidget(self.botonMolde)
+        caja.addLayout(filaMolde)
+
+        filaMedidas = qt.QHBoxLayout()
+        self.botonMedidas = qt.QPushButton("Ver las medidas")
+        filaMedidas.addWidget(self.botonMedidas)
+        self.botonLandmarks = qt.QPushButton("Marcar la linea media")
+        self.botonLandmarks.toolTip = (
+            "Crea tres puntos (nasion, bregma, inion) para comprobar que la "
+            "cabeza no este torcida en la tomografia, que sesgaria las medidas.")
+        filaMedidas.addWidget(self.botonLandmarks)
+        self.botonResetear = qt.QPushButton("Devolver todo a su lugar")
+        filaMedidas.addWidget(self.botonResetear)
+        caja.addLayout(filaMedidas)
+
+        self.estadoMedidas = self._estado("")
+        caja.addWidget(self.estadoMedidas)
+
+        self.botonPrepararPiezas.connect("clicked(bool)", self.onPrepararPiezas)
+        self.botonVoltear.connect("clicked(bool)", self.onVoltearPieza)
+        self.botonAjustarAlMolde.connect("clicked(bool)", self.onAjustarAlMolde)
+        self.botonMolde.connect("clicked(bool)", self.onMostrarMolde)
+        self.botonMedidas.connect("clicked(bool)", self.onVerMedidas)
+        self.botonLandmarks.connect("clicked(bool)", self.onMarcarLineaMedia)
+        self.botonResetear.connect("clicked(bool)", self.onResetearPiezas)
+
+    def onPrepararPiezas(self):
+        self._esperando(self.estadoPiezas, "Preparando las piezas...")
+        try:
+            filas = self.logic.prepararPiezas()
+        finally:
+            self._listo()
+        if not filas:
+            self._poner(self.estadoPiezas,
+                        "No encontre las piezas del corte. Volvé al Paso 3.", ROJO)
+            return
+        self._construirPanelFragmentos(filas)
+        movibles = sum(1 for f in filas if f["movible"])
+        self._poner(self.estadoPiezas,
+                    "%d pieza(s) en total: %d se pueden mover. La base '%s' "
+                    "queda fija; si esa no es la base del craneo, marcá otra con "
+                    "'Es la base'." % (len(filas), movibles,
+                                       self.logic.bloqueG.ancla or "-"), AZUL)
+        self._habilitar(self.paso5, True)
+
+    def _construirPanelFragmentos(self, filas):
+        while self.layoutFragmentos.count():
+            item = self.layoutFragmentos.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._filasFragmentos = []
+
+        for f in filas:
+            fila = qt.QWidget()
+            cajaFila = qt.QHBoxLayout(fila)
+            cajaFila.setContentsMargins(0, 2, 0, 2)
+
+            texto = "%s   %.1f cm3   -   %s" % (f["nombre"], f["volumen"],
+                                                f["estado"])
+            if f["desplazamiento"] > 0.05:
+                texto += "  (movida %.1f mm)" % f["desplazamiento"]
+            etiqueta = qt.QLabel(texto)
+            etiqueta.setWordWrap(True)
+            if f["esAncla"]:
+                etiqueta.setStyleSheet("font-size: 11px; font-weight: bold;")
+            elif not f["activa"]:
+                etiqueta.setStyleSheet("font-size: 11px; color: #999999;")
+            else:
+                etiqueta.setStyleSheet("font-size: 11px;")
+            cajaFila.addWidget(etiqueta, 3)
+
+            botonMover = qt.QPushButton("Mover con el mouse")
+            botonMover.setFixedWidth(130)
+            botonMover.setEnabled(f["movible"])
+            cajaFila.addWidget(botonMover)
+
+            botonBase = qt.QPushButton("Es la base")
+            botonBase.setFixedWidth(80)
+            botonBase.setEnabled(not f["esAncla"] and f["activa"])
+            cajaFila.addWidget(botonBase)
+
+            if f["activa"]:
+                botonQuitar = qt.QPushButton("Sacar")
+                botonQuitar.setStyleSheet(ESTILO_BOTON_QUITAR)
+            else:
+                botonQuitar = qt.QPushButton("Devolver")
+            botonQuitar.setFixedWidth(70)
+            botonQuitar.setEnabled(not f["esAncla"])
+            cajaFila.addWidget(botonQuitar)
+
+            self.layoutFragmentos.addWidget(fila)
+            self._filasFragmentos.append(f)
+
+            nombre = f["nombre"]
+            botonMover.connect("clicked(bool)",
+                               lambda _c, n=nombre: self.onSeleccionarPieza(n))
+            botonBase.connect("clicked(bool)",
+                              lambda _c, n=nombre: self.onFijarBase(n))
+            activa = f["activa"]
+            botonQuitar.connect(
+                "clicked(bool)",
+                lambda _c, n=nombre, a=activa: self.onSacarODevolver(n, a))
+
+    def _refrescarFragmentos(self):
+        self._construirPanelFragmentos(self.logic.bloqueG.tablaDePiezas())
+
+    def onSeleccionarPieza(self, nombre):
+        if not self.logic.bloqueG.manipular(nombre, True):
+            return
+        self._piezaSeleccionada = nombre
+        self.etiquetaPiezaActiva.setText("Pieza seleccionada: %s" % nombre)
+        self.panelMovimiento.setVisible(True)
+        self._poner(self.estadoPiezas,
+                    "Arrastrá las flechas para mover '%s' y los aros para "
+                    "girarla, o usá los botones de abajo." % nombre, AZUL)
+
+    def onFijarBase(self, nombre):
+        self.logic.bloqueG.fijar(nombre)
+        self._refrescarFragmentos()
+        self._poner(self.estadoPiezas,
+                    "'%s' quedo como base fija del armado." % nombre, AZUL)
+
+    def onSacarODevolver(self, nombre, estabaActiva):
+        if estabaActiva:
+            self.logic.bloqueG.descartar(nombre)
+        else:
+            self.logic.bloqueG.restaurar(nombre)
+        if self._piezaSeleccionada == nombre and estabaActiva:
+            self._piezaSeleccionada = None
+            self.panelMovimiento.setVisible(False)
+        self._refrescarFragmentos()
+
+    def _piezaActiva(self):
+        if not self._piezaSeleccionada:
+            self._poner(self.estadoPiezas,
+                        "Primero elegí una pieza con 'Mover con el mouse'.", ROJO)
+            return None
+        return self._piezaSeleccionada
+
+    def onMoverPieza(self, eje, signo):
+        nombre = self._piezaActiva()
+        if not nombre:
+            return
+        paso = self.spinPasoMM.value * signo
+        kwargs = {"dr": 0.0, "da": 0.0, "ds": 0.0}
+        kwargs[eje] = paso
+        self.logic.bloqueG.mover(nombre, **kwargs)
+        self._refrescarFragmentos()
+
+    def onGirarPieza(self, eje, signo):
+        nombre = self._piezaActiva()
+        if not nombre:
+            return
+        self.logic.bloqueG.rotar(nombre, eje, self.spinPasoGrados.value * signo)
+        self._refrescarFragmentos()
+
+    def onVoltearPieza(self):
+        nombre = self._piezaActiva()
+        if not nombre:
+            return
+        self.logic.bloqueG.voltear(nombre, "SI")
+        self._refrescarFragmentos()
+
+    def onAjustarAlMolde(self):
+        nombre = self._piezaActiva()
+        if not nombre:
+            return
+        if not self.logic.bloqueG.ajustar(nombre):
+            self._poner(self.estadoMedidas,
+                        "Primero generá el craneo objetivo.", ROJO)
+            return
+        self._refrescarFragmentos()
+
+    def onMostrarMolde(self):
+        info = self.logic.bloqueG.molde(self.spinIC.value)
+        if info is None:
+            self._poner(self.estadoMedidas,
+                        "No hay piezas activas para calcular el objetivo.", ROJO)
+            return
+        self._poner(self.estadoMedidas,
+                    "Craneo actual: %.0f mm de largo por %.0f mm de ancho "
+                    "(indice cefalico %.1f).\n"
+                    "Objetivo: %.0f x %.0f mm (indice %.1f).\n"
+                    "Hay que acortar %.0f mm de adelante hacia atras y ensanchar "
+                    "%.0f mm a lo ancho."
+                    % (info["largoActual"], info["anchoActual"], info["icActual"],
+                       info["largoObjetivo"], info["anchoObjetivo"],
+                       info["icObjetivo"], info["acortar"], info["ensanchar"]),
+                    AZUL)
+
+    def onVerMedidas(self):
+        m = self.logic.bloqueG.metricas()
+        if m is None:
+            self._poner(self.estadoMedidas, "No hay piezas preparadas.", ROJO)
+            return
+        lineas = [
+            "Largo (adelante-atras): %.0f mm" % m["largo"],
+            "Ancho (lado a lado):    %.0f mm" % m["ancho"],
+            "Alto:                   %.0f mm" % m["alto"],
+            "Indice cefalico: %.1f   (objetivo %.1f)" % (m["ic"], m["icObjetivo"]),
+        ]
+        if m["ic"] < m["icObjetivo"] - 1.0:
+            lineas.append("Faltan %.1f puntos: seguí acercando las piezas de "
+                          "adelante y de atras." % (m["icObjetivo"] - m["ic"]))
+        elif m["ic"] > m["icObjetivo"] + 1.0:
+            lineas.append("Te pasaste %.1f puntos del objetivo."
+                          % (m["ic"] - m["icObjetivo"]))
+        else:
+            lineas.append("El indice cefalico esta dentro del objetivo.")
+        if m["descartadas"]:
+            lineas.append("Hueso resecado: %.1f cm3 en %d pieza(s)."
+                          % (m["volumenDescartado"], len(m["descartadas"])))
+        if m["avisoInclinacion"]:
+            lineas.append("ATENCION: " + m["avisoInclinacion"])
+        self._poner(self.estadoMedidas, "\n".join(lineas),
+                    AMBAR if m["avisoInclinacion"] else AZUL)
+
+    def onMarcarLineaMedia(self):
+        self.logic.bloqueG.landmarks()
+        self._poner(self.estadoMedidas,
+                    "Se crearon los tres puntos de linea media. Colocalos sobre "
+                    "el craneo desde el modulo Markups (nasion en la raiz de la "
+                    "nariz, bregma arriba, inion atras) y despues volvé a "
+                    "'Ver las medidas'.", AZUL)
+
+    def onResetearPiezas(self):
+        n = self.logic.bloqueG.resetear()
+        self._refrescarFragmentos()
+        self._poner(self.estadoPiezas,
+                    "%d pieza(s) volvieron a su posicion original." % n, AZUL)
+
+    # ========================================================
+    # PASO 5 - EXPORTAR
+    # ========================================================
+    def _construirPaso5(self):
+        self.paso5 = ctk.ctkCollapsibleButton()
+        self.paso5.text = "Paso 5 - Exportar el resultado"
+        self.layout.addWidget(self.paso5)
+        caja = qt.QVBoxLayout(self.paso5)
+
+        caja.addWidget(self._ayuda(
+            "Guarda cada pieza como archivo STL, ya con los movimientos "
+            "aplicados. Son los archivos que van a la impresora 3D para hacer "
+            "el molde y las guias de corte."))
+
+        self.botonExportarArmado = qt.QPushButton(
+            "Guardar el armado final (STL)...")
+        self.botonExportarArmado.setStyleSheet(ESTILO_BOTON_PRINCIPAL)
+        caja.addWidget(self.botonExportarArmado)
+
+        self.botonExportarCrudo = qt.QPushButton(
+            "Guardar las piezas sin mover (STL)...")
+        self.botonExportarCrudo.toolTip = (
+            "Las piezas tal como quedaron despues del corte, en su posicion "
+            "original. Sirve para imprimir el craneo del paciente.")
+        caja.addWidget(self.botonExportarCrudo)
+
+        self.estadoExportar = self._estado("")
+        caja.addWidget(self.estadoExportar)
+
+        caja.addWidget(self._ayuda(
+            "Pendiente: reporte prequirurgico en PDF con las capturas, las "
+            "medidas y los movimientos de cada pieza."))
+
+        self.botonExportarArmado.connect("clicked(bool)", self.onExportarArmado)
+        self.botonExportarCrudo.connect("clicked(bool)", self.onExportarCrudo)
+
+    def _pedirCarpeta(self):
+        return qt.QFileDialog.getExistingDirectory(
+            self.parent, "Elegi la carpeta donde guardar los STL")
+
+    def onExportarArmado(self):
+        carpeta = self._pedirCarpeta()
+        if not carpeta:
+            return
+        self._esperando(self.estadoExportar, "Guardando...")
+        try:
+            n = self.logic.bloqueG.exportarSTL(carpeta)
+        finally:
+            self._listo()
+        self._poner(self.estadoExportar,
+                    "Se guardaron %d archivo(s) STL en:\n%s" % (n, carpeta),
+                    VERDE if n else ROJO)
+
+    def onExportarCrudo(self):
+        carpeta = self._pedirCarpeta()
+        if not carpeta:
+            return
+        self._esperando(self.estadoExportar, "Guardando...")
+        try:
+            n = BloqueF.exportar_stl(carpeta)
+        finally:
+            self._listo()
+        self._poner(self.estadoExportar,
+                    "Se guardaron %d archivo(s) STL en:\n%s" % (n, carpeta),
+                    VERDE if n else ROJO)
+
+    # ========================================================
+    # CONSOLA DE DETALLE
+    # ========================================================
+    def _construirConsola(self):
+        self.consola = ctk.ctkCollapsibleButton()
+        self.consola.text = "Detalle tecnico"
+        self.consola.collapsed = True
+        self.layout.addWidget(self.consola)
+        caja = qt.QVBoxLayout(self.consola)
+        caja.addWidget(self._ayuda(
+            "Todo lo que fue haciendo el sistema, con los numeros. Sirve para "
+            "revisar un caso raro o para pegarlo en un reporte de error."))
+        self.textoConsola = qt.QTextEdit()
+        self.textoConsola.setReadOnly(True)
+        self.textoConsola.setMinimumHeight(220)
+        self.textoConsola.setStyleSheet("font-family: monospace; font-size: 11px;")
+        caja.addWidget(self.textoConsola)
+        botonLimpiar = qt.QPushButton("Limpiar")
+        caja.addWidget(botonLimpiar)
+        botonLimpiar.connect("clicked(bool)",
+                             lambda _c: self.textoConsola.clear())
+
+    def _log(self, mensaje):
+        """Todo lo que imprimen los bloques pasa por aca: va a la consola de
+        Python (para nosotros) y al panel de detalle (para el medico, que no
+        abre la consola de Python)."""
+        texto = str(mensaje)
+        print(texto)
+        try:
+            self.textoConsola.append(texto)
+            barra = self.textoConsola.verticalScrollBar()
+            barra.setValue(barra.maximum)
+        except Exception:
+            pass
+
+    # ========================================================
+    # CICLO DE VIDA
+    # ========================================================
+    def _resetearVista3D(self):
+        try:
+            slicer.app.layoutManager().threeDWidget(0).threeDView().resetFocalPoint()
+        except Exception:
+            pass
 
     def cleanup(self) -> None:
         self.removeObservers()
+        if self.logic is not None:
+            self.logic.limpiarTemporal()
 
     def enter(self) -> None:
         self.initializeParameterNode()
 
     def exit(self) -> None:
-        if self._parameterNode:
+        if self._parameterNode and self._parameterNodeGuiTag:
             self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
             self._parameterNodeGuiTag = None
 
@@ -313,1889 +1446,137 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.setParameterNode(self.logic.getParameterNode())
 
     def setParameterNode(self, inputParameterNode) -> None:
-        if self._parameterNode:
+        if self._parameterNode and self._parameterNodeGuiTag:
             self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
-        self._parameterNode = inputParameterNode
-        if self._parameterNode:
             self._parameterNodeGuiTag = None
+        self._parameterNode = inputParameterNode
 
-    # -------------------------------------------------------
-    # Paso 1 — handlers
-    # -------------------------------------------------------
 
-    def onBotonCargarEstudioClicked(self):
-        carpetaSeleccionada = qt.QFileDialog.getExistingDirectory(
-            self.parent, "Seleccioná la carpeta del estudio DICOM"
-        )
-        if not carpetaSeleccionada:
-            return
-
-        self.etiquetaEstadoCarga.setText("Cargando estudio, por favor esperá...")
-        self.etiquetaEstadoCarga.setStyleSheet("color: orange;")
-        slicer.app.processEvents()
-
-        volumenNode, metodoUsado = self.logic.cargarCarpetaDicom(carpetaSeleccionada)
-
-        if volumenNode is None:
-            self.etiquetaEstadoCarga.setText(
-                "No se encontró ninguna serie volumétrica válida en esa carpeta."
-            )
-            self.etiquetaEstadoCarga.setStyleSheet("color: red;")
-            return
-
-        self._parameterNode.estudioCargado = volumenNode
-
-        if metodoUsado == "hueso_explicito":
-            self.etiquetaEstadoCarga.setText(f"Estudio cargado: {volumenNode.GetName()}")
-            self.etiquetaEstadoCarga.setStyleSheet("color: green;")
-        else:
-            self.etiquetaEstadoCarga.setText(
-                f"Estudio cargado: {volumenNode.GetName()}\n"
-                "(no había serie de \"hueso\" explícita; se usó la mejor "
-                "serie volumétrica disponible)"
-            )
-            self.etiquetaEstadoCarga.setStyleSheet("color: #B8860B;")
-
-    # -------------------------------------------------------
-    # Paso 2A — Generar candidatas
-    # -------------------------------------------------------
-
-    def onBotonGenerarCraneoClicked(self):
-        volumenActual = self._parameterNode.estudioCargado
-
-        if volumenActual is None:
-            self.etiquetaEstadoCraneo.setText("Primero tenés que cargar un estudio (Paso 1).")
-            self.etiquetaEstadoCraneo.setStyleSheet("color: red;")
-            return
-
-        self.etiquetaEstadoCraneo.setText("Generando cráneo 3D, por favor esperá...")
-        self.etiquetaEstadoCraneo.setStyleSheet("color: orange;")
-        slicer.app.processEvents()
-
-        resultado = self.logic.generarCandidatas(volumenActual)
-
-        if resultado is None:
-            self.etiquetaEstadoCraneo.setText(
-                "No se pudo generar el cráneo. Revisá el estudio cargado."
-            )
-            self.etiquetaEstadoCraneo.setStyleSheet("color: red;")
-            return
-
-        self._segmentationNode, self._islasRevision, self._coloresOriginales = resultado
-
-        n = len(self._islasRevision)
-        nAlejadas = sum(1 for isla in self._islasRevision if isla.get("alejada"))
-        mensaje = (
-            f"Se encontraron {n} isla(s) candidata(s). "
-            f"{'Revisalas antes de confirmar.' if n > 1 else 'Una sola isla — podés confirmar directamente.'}"
-        )
-        if nAlejadas:
-            mensaje += (
-                f"\n{nAlejadas} de ellas está(n) marcada(s) como ALEJADA: revisalas "
-                "con atención, puede ser hueso real separado por una sutura abierta."
-            )
-        self.etiquetaEstadoCraneo.setText(mensaje)
-        self.etiquetaEstadoCraneo.setStyleSheet("color: #1F4E79;")
-
-        self._construirPanelRevision()
-
-    def _construirPanelRevision(self):
-        while self.layoutIslas.count():
-            item = self.layoutIslas.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._botonesIslas = []
-
-        for isla in self._islasRevision:
-            numero = isla["numero"]
-            vol = isla["vol"]
-            dist = isla["dist"]
-            alejada = isla.get("alejada", False)
-
-            filaWidget = qt.QWidget()
-            filaLayout = qt.QHBoxLayout(filaWidget)
-            filaLayout.setContentsMargins(0, 2, 0, 2)
-
-            if alejada:
-                etiqueta = qt.QLabel(
-                    f"Isla {numero}  |  {vol:.1f} cm3  |  {dist:.0f} mm de la masa "
-                    "principal — ALEJADA, revisar"
-                )
-                etiqueta.setStyleSheet("font-size: 10px; color: #B8860B; font-weight: bold;")
-            else:
-                etiqueta = qt.QLabel(f"Isla {numero}  |  {vol:.1f} cm3  |  dist: {dist:.0f} mm")
-                etiqueta.setStyleSheet("font-size: 10px;")
-            # addWidget con factor de stretch: en Slicer 5.10 el argumento
-            # va POSICIONAL. Pasarlo como kwarg (stretch=2) falla en runtime.
-            filaLayout.addWidget(etiqueta, 2)
-
-            botonResaltar = qt.QPushButton("Resaltar")
-            botonResaltar.setStyleSheet("padding: 3px 8px;")
-            botonResaltar.setFixedWidth(70)
-            filaLayout.addWidget(botonResaltar)
-
-            botonEliminar = qt.QPushButton("Eliminar")
-            botonEliminar.setStyleSheet(
-                "padding: 3px 8px; background-color: #C0392B; color: white;"
-            )
-            botonEliminar.setFixedWidth(70)
-            filaLayout.addWidget(botonEliminar)
-
-            self.layoutIslas.addWidget(filaWidget)
-            self._botonesIslas.append({
-                "numero": numero,
-                "filaWidget": filaWidget,
-                "botonResaltar": botonResaltar,
-                "botonEliminar": botonEliminar,
-            })
-
-            botonResaltar.connect(
-                "clicked(bool)",
-                lambda _, n=numero: self.onResaltarIsla(n)
-            )
-            botonEliminar.connect(
-                "clicked(bool)",
-                lambda _, n=numero: self.onEliminarIsla(n)
-            )
-
-        self.separadorRevision.setVisible(True)
-        self.etiquetaRevision.setVisible(True)
-        self.etiquetaAyudaRevision.setVisible(True)
-        self.contenedorIslas.setVisible(True)
-        self.botonConfirmarCraneo.setVisible(True)
-        self.etiquetaEstadoConfirmacion.setText("")
-
-    # -------------------------------------------------------
-    # Paso 2B — Revisión de islas
-    # -------------------------------------------------------
-
-    def onResaltarIsla(self, numero):
-        segmentacion = self._segmentationNode.GetSegmentation()
-        for isla in self._islasRevision:
-            seg = segmentacion.GetSegment(isla["segId"])
-            if seg is None:
-                continue
-            if isla["numero"] == numero:
-                seg.SetColor(1.0, 0.2, 0.2)
-            else:
-                color = self._coloresOriginales.get(isla["segId"], (0.5, 0.5, 0.5))
-                seg.SetColor(*color)
-
-    def onEliminarIsla(self, numero):
-        isla = next((i for i in self._islasRevision if i["numero"] == numero), None)
-        if isla is None:
-            return
-
-        segmentacion = self._segmentationNode.GetSegmentation()
-        segmentacion.RemoveSegment(isla["segId"])
-
-        self._islasRevision = [i for i in self._islasRevision if i["numero"] != numero]
-        self._coloresOriginales.pop(isla["segId"], None)
-
-        fila = next((b for b in self._botonesIslas if b["numero"] == numero), None)
-        if fila:
-            fila["filaWidget"].setVisible(False)
-            self._botonesIslas = [b for b in self._botonesIslas if b["numero"] != numero]
-
-        n = len(self._islasRevision)
-        self.etiquetaEstadoCraneo.setText(
-            f"Isla {numero} eliminada. Quedan {n} isla(s)."
-        )
-        self.etiquetaEstadoCraneo.setStyleSheet("color: #B8860B;")
-
-    def onBotonConfirmarCraneoClicked(self):
-        if not self._islasRevision:
-            self.etiquetaEstadoConfirmacion.setText(
-                "No quedan islas. Volvé a generar el cráneo."
-            )
-            self.etiquetaEstadoConfirmacion.setStyleSheet("color: red;")
-            return
-
-        self.etiquetaEstadoConfirmacion.setText("Confirmando, por favor esperá...")
-        self.etiquetaEstadoConfirmacion.setStyleSheet("color: orange;")
-        slicer.app.processEvents()
-
-        volumenActual = self._parameterNode.estudioCargado
-        exito = self.logic.confirmarCraneo(
-            self._segmentationNode,
-            self._islasRevision,
-            volumenActual
-        )
-
-        if not exito:
-            self.etiquetaEstadoConfirmacion.setText("Error al confirmar el cráneo.")
-            self.etiquetaEstadoConfirmacion.setStyleSheet("color: red;")
-            return
-
-        self.etiquetaEstadoConfirmacion.setText("Cráneo final confirmado.")
-        self.etiquetaEstadoConfirmacion.setStyleSheet(
-            "color: #1E7B45; font-weight: bold;"
-        )
-
-        self.separadorRevision.setVisible(False)
-        self.etiquetaRevision.setVisible(False)
-        self.etiquetaAyudaRevision.setVisible(False)
-        self.contenedorIslas.setVisible(False)
-        self.botonConfirmarCraneo.setVisible(False)
-
-        # Exportamos automáticamente a modelo 3D, para que el Paso 3
-        # (planificar osteotomía) ya tenga con qué trabajar sin que
-        # el usuario tenga que pasar por el módulo Segmentations.
-        # El cráneo restante arranca siendo el cráneo entero confirmado.
-        self._craneoRestante = self.logic.exportarSegmentoAModelo(
-            self._segmentationNode, nombreSegmento="Craneo_Final"
-        )
-        self._fragmentosExtraidos = []
-
-        # Un cráneo pediátrico tiene suturas abiertas, así que el hueso
-        # puede venir ya en varias piezas desconectadas antes de cortar
-        # nada. Avisarlo evita confundir una pieza preexistente con un
-        # fragmento creado por el corte — que era justamente el bug del
-        # planificador. Ahora el corte lo tiene en cuenta explícitamente.
-        if self._craneoRestante is not None:
-            piezasIniciales = self.logic.contarPiezasConectadas(
-                self._craneoRestante.GetPolyData()
-            )
-            if piezasIniciales > 1:
-                self.etiquetaEstadoConfirmacion.setText(
-                    f"Cráneo final confirmado.\nAviso: el hueso ya viene en "
-                    f"{piezasIniciales} piezas desconectadas antes de cortar "
-                    "(normal en cráneos pediátricos con suturas abiertas). "
-                    "El planificador de cortes lo tiene en cuenta y NO las "
-                    "confunde con fragmentos de una osteotomía."
-                )
-                self.etiquetaEstadoConfirmacion.setStyleSheet(
-                    "color: #B8860B; font-weight: bold;"
-                )
-
-        # A partir de acá se trabaja sobre el MODELO, no sobre la
-        # segmentación. Si dejamos las dos visibles, Slicer renderiza el
-        # cráneo dos veces en cada movimiento del mouse — una de las causas
-        # del lag al rotar la vista 3D. Ocultar la segmentación no pierde
-        # nada: sus datos siguen en la escena.
-        displaySegmentacion = self._segmentationNode.GetDisplayNode()
-        if displaySegmentacion is not None:
-            displaySegmentacion.SetVisibility(False)
-
-        layoutManager = slicer.app.layoutManager()
-        threeDWidget = layoutManager.threeDWidget(0)
-        threeDWidget.threeDView().resetFocalPoint()
-
-    # -------------------------------------------------------
-    # Paso 3 — Planificar osteotomía
-    # -------------------------------------------------------
-
-    def onBotonTrazarCorteClicked(self):
-        if self._craneoRestante is None:
-            self.etiquetaEstadoCorte.setText("Primero confirmá el cráneo (Paso 2).")
-            self.etiquetaEstadoCorte.setStyleSheet("color: red;")
-            return
-
-        # Si había una curva anterior a medio trazar, la limpiamos
-        self._quitarObservadorCurva()
-        if self._curvaCorteActual is not None:
-            try:
-                slicer.mrmlScene.RemoveNode(self._curvaCorteActual)
-            except Exception:
-                pass
-            self._curvaCorteActual = None
-
-        # Creamos la curva de osteotomía.
-        # NOTA: vtkMRMLMarkupsCurveNode (abierta) nace abierta por
-        # definición, sin setter de "closed" — solo GetCurveClosed()
-        # para consultar. Para una curva CERRADA usamos directamente la
-        # clase vtkMRMLMarkupsClosedCurveNode, que sí cierra el lazo
-        # automáticamente. La Logic maneja ambos casos por igual según
-        # la clase real del nodo.
-        claseNodo = (
-            "vtkMRMLMarkupsClosedCurveNode"
-            if self.checkCurvaCerrada.checked
-            else "vtkMRMLMarkupsCurveNode"
-        )
-        # Nombre único: GenerateUniqueName agrega sufijo (_1, _2, ...) si el
-        # nombre ya existe, así no quedan varios nodos "Osteotomia" con el
-        # mismo nombre visible en el panel Data tras varios cortes.
-        nombreCurva = slicer.mrmlScene.GenerateUniqueName("Osteotomia")
-        curvaNode = slicer.mrmlScene.AddNewNodeByClass(claseNodo, nombreCurva)
-        curvaNode.CreateDefaultDisplayNodes()
-        displayNode = curvaNode.GetDisplayNode()
-        if displayNode is not None:
-            displayNode.SetSelectedColor(1.0, 0.2, 0.2)   # rojo al estar seleccionada
-            displayNode.SetColor(1.0, 0.4, 0.4)           # rojo claro
-            displayNode.SetGlyphScale(2.5)                # tamaño de los puntos
-            displayNode.SetLineThickness(0.5)             # grosor de la línea que une los puntos
-            displayNode.SetPropertiesLabelVisibility(False)  # oculta el texto de propiedades
-            displayNode.SetPointLabelsVisibility(False)       # oculta las etiquetas 5-2, 5-3, etc.
-
-        self._curvaCorteActual = curvaNode
-        self._curvaEsCerrada = bool(self.checkCurvaCerrada.checked)
-
-        self._observadorCurvaTag = curvaNode.AddObserver(
-            slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent,
-            self._onPuntoAgregadoALaCurva
-        )
-
-        self.placeWidgetCorte.setCurrentNode(curvaNode)
-        self.placeWidgetCorte.setPlaceModePersistency(True)
-        self.placeWidgetCorte.setPlaceModeEnabled(True)
-
-        self.botonFinalizarTrazado.enabled = True
-        self.botonGenerarCorte.enabled = False
-        self.etiquetaEstadoCorte.setText(
-            "Modo de trazado activo. Hacé click sobre el cráneo en el visor 3D "
-            "para colocar los puntos del corte (0 hasta ahora)."
-        )
-        self.etiquetaEstadoCorte.setStyleSheet("color: orange;")
-
-    def _onPuntoAgregadoALaCurva(self, caller, event):
-        """Refresca la etiqueta de estado en tiempo real al colocar puntos."""
-        if self._curvaCorteActual is None:
-            return
-        n = self._curvaCorteActual.GetNumberOfControlPoints()
-        self.etiquetaEstadoCorte.setText(
-            f"Modo de trazado activo. Puntos colocados: {n}. "
-            "Cuando termines, presioná 'Finalizar trazado'."
-        )
-        self.etiquetaEstadoCorte.setStyleSheet("color: orange;")
-
-    def _quitarObservadorCurva(self):
-        """Saca el observador de la curva, si estaba puesto."""
-        if self._observadorCurvaTag is not None and self._curvaCorteActual is not None:
-            try:
-                self._curvaCorteActual.RemoveObserver(self._observadorCurvaTag)
-            except Exception:
-                pass
-        self._observadorCurvaTag = None
-
-    def onBotonFinalizarTrazadoClicked(self):
-        self.placeWidgetCorte.setPlaceModeEnabled(False)
-        self._quitarObservadorCurva()
-
-        numeroPuntos = 0 if self._curvaCorteActual is None else self._curvaCorteActual.GetNumberOfControlPoints()
-
-        if numeroPuntos < 2:
-            print("CranioPlan: DIAGNÓSTICO — curvas presentes en la escena:")
-            todasLasCurvas = slicer.util.getNodesByClass("vtkMRMLMarkupsCurveNode")
-            for c in todasLasCurvas:
-                print(f"  - {c.GetName()} (ID {c.GetID()}): {c.GetNumberOfControlPoints()} puntos")
-
-            self.etiquetaEstadoCorte.setText(
-                f"Necesitás al menos 2 puntos para trazar el corte (tenés {numeroPuntos}). "
-                "No hace falta cerrar la curva ni volver al punto inicial: colocá los "
-                "puntos y presioná 'Finalizar trazado' directamente. "
-                "Volvé a presionar 'Trazar línea de corte' e intentá de nuevo."
-            )
-            self.etiquetaEstadoCorte.setStyleSheet("color: red;")
-            return
-
-        self.botonFinalizarTrazado.enabled = False
-        self.botonGenerarCorte.enabled = True
-        self.etiquetaEstadoCorte.setText(
-            f"Línea de corte lista ({numeroPuntos} puntos). "
-            "Ajustá el grosor y presioná 'Generar corte'."
-        )
-        self.etiquetaEstadoCorte.setStyleSheet("color: #1F4E79;")
-
-    def onBotonGenerarCorteClicked(self):
-        if self._craneoRestante is None:
-            self.etiquetaEstadoCorte.setText("Primero confirmá el cráneo (Paso 2).")
-            self.etiquetaEstadoCorte.setStyleSheet("color: red;")
-            return
-        if self._curvaCorteActual is None:
-            self.etiquetaEstadoCorte.setText(
-                "No hay una curva de corte activa. Trazá una línea primero."
-            )
-            self.etiquetaEstadoCorte.setStyleSheet("color: red;")
-            return
-
-        self.etiquetaEstadoCorte.setText("Calculando el corte, por favor esperá...")
-        self.etiquetaEstadoCorte.setStyleSheet("color: orange;")
-        slicer.app.processEvents()
-
-        grosorMM = self.spinGrosor.value
-        volumenActual = self._parameterNode.estudioCargado
-
-        # El corte opera SOLO sobre el cráneo restante actual. Hacemos una
-        # copia de respaldo de su geometría por si el corte falla, y otra
-        # copia como entrada para la Logic.
-        respaldoPD = vtk.vtkPolyData()
-        respaldoPD.DeepCopy(self._craneoRestante.GetPolyData())
-
-        mallaRemanente = vtk.vtkPolyData()
-        mallaRemanente.DeepCopy(self._craneoRestante.GetPolyData())
-
-        # Quitamos el nodo viejo del restante ANTES de llamar a la Logic:
-        # así el nuevo "Craneo_restante" queda con nombre limpio (sin
-        # sufijo "_1" feo por colisión de nombres).
-        slicer.mrmlScene.RemoveNode(self._craneoRestante)
-        self._craneoRestante = None
-
-        indiceInicial = len(self._fragmentosExtraidos) + 1
-
-        resultado = self.logic.generarOsteotomia(
-            mallaRemanente,
-            self._curvaCorteActual,
-            volumenActual,
-            indiceInicialFragmento=indiceInicial,
-            grosorMM=grosorMM,
-        )
-
-        if not resultado or resultado.get("restante") is None:
-            # El corte falló: reconstruimos el restante desde el respaldo
-            # para no dejar la escena sin cráneo.
-            self._craneoRestante = self.logic.crearModeloDesdePolyData(
-                respaldoPD, "Craneo_restante", (0.9, 0.8, 0.6)
-            )
-            self.etiquetaEstadoCorte.setText(
-                "No se pudo calcular el corte. El cráneo restante quedó intacto. "
-                "Revisá la consola de Python para ver el diagnóstico detallado."
-            )
-            self.etiquetaEstadoCorte.setStyleSheet("color: red;")
-            # dejamos habilitado 'Generar corte' por si quiere reintentar
-            return
-
-        self._craneoRestante = resultado["restante"]
-        nuevosFragmentos = resultado["fragmentos"]
-        self._fragmentosExtraidos.extend(nuevosFragmentos)
-
-        piezasCreadas = resultado["piezasCreadas"]
-        piezasAntes = resultado["piezasAntes"]
-
-        if piezasCreadas >= 1:
-            self.etiquetaEstadoCorte.setText(
-                f"Corte realizado. Se extrajo {piezasCreadas} fragmento(s) nuevo(s), "
-                "resaltado(s) en color; el resto quedó como cráneo restante (un solo "
-                "modelo, aunque tenga varias placas separadas por suturas).\n"
-                f"Total de fragmentos extraídos hasta ahora: {len(self._fragmentosExtraidos)}. "
-                "Podés trazar otro corte sobre el cráneo restante."
-            )
-            self.etiquetaEstadoCorte.setStyleSheet("color: green;")
-        else:
-            self.etiquetaEstadoCorte.setText(
-                "El corte se calculó, pero no separó ningún fragmento nuevo del cráneo "
-                "restante.\n"
-                "Si usaste una línea abierta, recordá que solo separa si sus extremos "
-                "llegan a un borde del hueso. Para aislar una región en el medio, usá "
-                "'Curva cerrada'."
-            )
-            self.etiquetaEstadoCorte.setStyleSheet("color: #B8860B;")
-
-        # Preparar para el próximo corte
-        self.botonGenerarCorte.enabled = False
-        self._curvaCorteActual = None
-
-        layoutManager = slicer.app.layoutManager()
-        layoutManager.threeDWidget(0).threeDView().resetFocalPoint()
-
-
-#
-# CranioPlanLogic
-#
-
-
+# ============================================================
+# LOGICA - orquesta los bloques, sin un solo widget adentro
+# ============================================================
 class CranioPlanLogic(ScriptedLoadableModuleLogic):
-    """Funciones de procesamiento del módulo CranioPlan, sin interfaz."""
+    """
+    No implementa algoritmos: los llama en orden y traduce sus resultados.
 
-    def __init__(self) -> None:
+    Esa es la razon de que sea corta. Si algo de aca empieza a crecer, casi
+    seguro pertenece a un bloque de CranioPlanLib.
+    """
+
+    def __init__(self, log=None) -> None:
         ScriptedLoadableModuleLogic.__init__(self)
+        self.log = log if log is not None else print
+        self.bloqueA = BloqueA.BloqueA(log=self.log)
+        self.bloqueG = BloqueG.BloqueG(log=self.log)
+        # Carpeta del estudio en curso. Si el medico eligio un .zip, es la
+        # carpeta temporal donde se descomprimio, y hay que borrarla al final.
+        self._carpetaEstudio = None
+        self._carpetaTemporal = None
+        # El Bloque F trabaja con constantes de modulo (asi sigue siendo
+        # pegable en la consola tal cual). Se le enchufa el mismo log y el
+        # prefijo de curvas para que no agarre curvas viejas de la escena.
+        BloqueF.configurar(log=self.log, PREFIJO_CURVAS=Comun.PREFIJO_CURVA_CORTE)
 
     def getParameterNode(self):
         return CranioPlanParameterNode(super().getParameterNode())
 
-    # ============================================================
-    # BLOQUE C — Identificación automática de la serie de hueso
-    # ============================================================
-
-    def identificarSerieDeHueso(self, db, seriesUIDs):
+    # -------- Paso 1 --------
+    def analizarEstudio(self, ruta):
         """
-        Devuelve (seriesUID, metodoUsado) o (None, None).
-        metodoUsado: "hueso_explicito" | "fallback_volumetrico"
+        Acepta una carpeta o un .zip. Devuelve el ranking de series.
+
+        La carpeta del estudio queda guardada aca y no en el widget porque es
+        la Logic la que despues tiene que cargar la serie: si el widget la
+        perdiera (por ejemplo al cerrarse la escena), la carga fallaria con un
+        error que no dice nada.
         """
-        palabrasClaveHueso = ["hueso", "bone"]
-        palabrasClavePlanoFijo = ["axial", "coronal", "sagittal"]
-        volumetricasValidas = []
-
-        for seriesUID in seriesUIDs:
-            archivos = db.filesForSeries(seriesUID)
-            if not archivos:
-                continue
-            ds = pydicom.dcmread(archivos[0], stop_before_pixels=True)
-            descripcion = str(getattr(ds, "SeriesDescription", "")).lower()
-
-            if any(p in descripcion for p in palabrasClavePlanoFijo):
-                continue
-            espesorCorte = getattr(ds, "SliceThickness", None)
-            if espesorCorte is None:
-                continue
-
-            tieneHueso = any(p in descripcion for p in palabrasClaveHueso)
-            volumetricasValidas.append((seriesUID, float(espesorCorte), len(archivos), tieneHueso))
-
-        if not volumetricasValidas:
-            return None, None
-
-        candidatasIdeales = [v for v in volumetricasValidas if v[3]]
-        if candidatasIdeales:
-            candidatasIdeales.sort(key=lambda c: (c[1], -c[2]))
-            return candidatasIdeales[0][0], "hueso_explicito"
-
-        volumetricasValidas.sort(key=lambda c: (c[1], -c[2]))
-        return volumetricasValidas[0][0], "fallback_volumetrico"
-
-    def cargarCarpetaDicom(self, rutaCarpeta):
-        """
-        Importa una carpeta DICOM y carga la serie elegida por
-        identificarSerieDeHueso.
-        Devuelve (volumenNode, metodoUsado) o (None, None).
-        """
-        with DICOMUtils.TemporaryDICOMDatabase() as db:
-            DICOMUtils.importDicom(rutaCarpeta, db)
-
-            patientUIDs = db.patients()
-            if not patientUIDs:
-                return None, None
-
-            studyUIDs = db.studiesForPatient(patientUIDs[0])
-            if not studyUIDs:
-                return None, None
-
-            seriesUIDs = db.seriesForStudy(studyUIDs[0])
-            if not seriesUIDs:
-                return None, None
-
-            serieElegidaUID, metodoUsado = self.identificarSerieDeHueso(db, seriesUIDs)
-            if serieElegidaUID is None:
-                return None, None
-
-            loadedNodeIDs = DICOMUtils.loadSeriesByUID([serieElegidaUID])
-            for nodeID in loadedNodeIDs:
-                node = slicer.mrmlScene.GetNodeByID(nodeID)
-                if node and node.IsA("vtkMRMLScalarVolumeNode"):
-                    return node, metodoUsado
-
-        return None, None
-
-    # ============================================================
-    # BLOQUE A + B — Segmentación automática y revisión manual
-    # ============================================================
-
-    def _tocaBordeDelVolumen(self, mascara):
-        """True si la mascara toca alguna cara del volumen."""
-        return bool(
-            np.any(mascara[0, :, :]) or np.any(mascara[-1, :, :]) or
-            np.any(mascara[:, 0, :]) or np.any(mascara[:, -1, :]) or
-            np.any(mascara[:, :, 0]) or np.any(mascara[:, :, -1])
-        )
-
-    def generarCandidatas(self, volumeNode, umbralMinimoHU=300, umbralMaximoHU=3000,
-                            margenProximidadMM=40.0, umbralRelativo=0.05):
-        """
-        BLOQUE A: threshold + islands + filtro de borde + filtro de
-        proximidad física + filtro de tamaño relativo.
-
-        Esta es la lógica ORIGINAL de Nacho (v5), que dejaba una revisión
-        limpia con solo las placas reales del cráneo. Se restaura tal cual
-        porque el intento anterior (mandar TODO a revisión, sin filtros)
-        llenaba el panel de 24 islas de motitas de 0.1 cm³ y, peor, ensuciaba
-        la malla de Craneo_Final: al unir 24 pedazos, la exportación
-        generaba cientos de regiones y el Bloque F recibía una malla
-        fragmentada imposible de cortar. Filtrar acá mantiene todo limpio.
-
-        Los tres filtros automáticos:
-          (a) BORDE: se descarta toda isla que toque el borde del volumen
-              (camilla, colchoneta, soportes; el cráneo nunca toca el borde).
-          (b) PROXIMIDAD FÍSICA: partiendo de la isla mayor sin tocar borde,
-              se agregan iterativamente las que estén a <= margenProximidadMM
-              de la masa ya aceptada (transformada de distancia euclídea).
-              Esto incorpora los huesos separados por suturas abiertas, que
-              están CERCA aunque su centroide quede lejos. Las que quedan más
-              lejos que el margen se descartan (ruido, camilla parcial, etc.).
-          (c) TAMAÑO RELATIVO: entre las aceptadas, se descartan las menores
-              a umbralRelativo del volumen de la mayor.
-
-        NOTA sobre el bug del hueso posterior (26/07/2026): la porción
-        occipital que "desaparecía al confirmar" NO se perdía acá — sobrevive
-        a estos tres filtros (es una placa grande y cercana). Se perdía en la
-        exportación a modelo, por una limpieza de malla con umbral RELATIVO
-        que borraba placas chicas legítimas. Ese punto se corrigió aparte,
-        en exportarSegmentoAModelo (ahora usa umbral absoluto). Por eso acá se
-        puede restaurar la lógica de Nacho sin reintroducir aquel bug.
-
-        Se DETIENE antes de fusionar y devuelve las piezas candidatas para la
-        revisión manual del Bloque B.
-        """
-        print(f"CranioPlan {CRANIOPLAN_VERSION}: Bloque A (generarCandidatas).")
-
-        if volumeNode is None:
-            return None
-
+        self.limpiarTemporal()
         try:
-            from scipy import ndimage
-        except ImportError:
-            print("CranioPlan: scipy no disponible; el filtro de proximidad lo necesita. "
-                  "Se usará solo el filtro de borde y el de tamaño relativo.")
-            ndimage = None
-
-        segmentationNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLSegmentationNode')
-        segmentationNode.SetName("Craneo_Automatico")
-        segmentationNode.CreateDefaultDisplayNodes()
-        segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
-        segmentId = segmentationNode.GetSegmentation().AddEmptySegment("Hueso")
-
-        segmentEditorWidget = slicer.qMRMLSegmentEditorWidget()
-        segmentEditorWidget.setMRMLScene(slicer.mrmlScene)
-        segmentEditorNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLSegmentEditorNode')
-        segmentEditorWidget.setMRMLSegmentEditorNode(segmentEditorNode)
-        segmentEditorWidget.setSegmentationNode(segmentationNode)
-        segmentEditorWidget.setSourceVolumeNode(volumeNode)
-        segmentEditorWidget.setCurrentSegmentID(segmentId)
-
-        segmentEditorWidget.setActiveEffectByName("Threshold")
-        thresholdEffect = segmentEditorWidget.activeEffect()
-        thresholdEffect.setParameter("MinimumThreshold", str(umbralMinimoHU))
-        thresholdEffect.setParameter("MaximumThreshold", str(umbralMaximoHU))
-        thresholdEffect.self().onApply()
-
-        segmentEditorWidget.setActiveEffectByName("Islands")
-        islandsEffect = segmentEditorWidget.activeEffect()
-        islandsEffect.setParameter("Operation", "SPLIT_ISLANDS_TO_SEGMENTS")
-        islandsEffect.self().onApply()
-
-        segmentacion = segmentationNode.GetSegmentation()
-        nSegments = segmentacion.GetNumberOfSegments()
-        print(f"CranioPlan: threshold {umbralMinimoHU}-{umbralMaximoHU} HU -> {nSegments} isla(s).")
-
-        if nSegments == 0:
-            segmentEditorWidget = None
-            slicer.mrmlScene.RemoveNode(segmentEditorNode)
+            carpeta, temporal = BloqueC.prepararCarpeta(ruta)
+        except Exception as e:
+            self.log("CranioPlan: no pude abrir el .zip: %s" % e)
             return None
+        self._carpetaEstudio = carpeta
+        self._carpetaTemporal = temporal
+        return BloqueC.analizarEstudio(carpeta, log=self.log)
 
-        espaciado = volumeNode.GetSpacing()
-        muestreoZYX = (espaciado[2], espaciado[1], espaciado[0])
-        volumenVoxelCM3 = (espaciado[0] * espaciado[1] * espaciado[2]) / 1000.0
-
-        islas = {}
-        for i in range(nSegments):
-            segId = segmentacion.GetNthSegmentID(i)
-            mascara = slicer.util.arrayFromSegmentBinaryLabelmap(
-                segmentationNode, segId, volumeNode
-            ).astype(bool)
-            nVoxeles = int(np.count_nonzero(mascara))
-            if nVoxeles == 0:
-                continue
-            islas[segId] = {
-                "mask": mascara,
-                "vol": nVoxeles * volumenVoxelCM3,
-                "tocaBorde": self._tocaBordeDelVolumen(mascara),
-            }
-
-        nPorBorde = sum(1 for d in islas.values() if d["tocaBorde"])
-        print(
-            f"CranioPlan: {nPorBorde} isla(s) descartada(s) por tocar el borde del "
-            "volumen (camilla, colchoneta, soportes)."
-        )
-
-        candidatasPool = {k: v for k, v in islas.items() if not v["tocaBorde"]}
-
-        if not candidatasPool:
-            print(
-                "CranioPlan: todas las islas tocan el borde del volumen. "
-                "Revisa el campo de vision del estudio o los umbrales HU."
-            )
-            segmentEditorWidget = None
-            slicer.mrmlScene.RemoveNode(segmentEditorNode)
-            slicer.mrmlScene.RemoveNode(segmentationNode)
+    def cargarSerie(self, seriesUID):
+        if not self._carpetaEstudio:
+            self.log("CranioPlan: no hay ningun estudio analizado todavia.")
             return None
+        return BloqueC.cargarSerie(self._carpetaEstudio, seriesUID, log=self.log)
 
-        refSegId = max(candidatasPool, key=lambda k: candidatasPool[k]["vol"])
-        print(
-            f"CranioPlan: isla de referencia (mayor volumen sin tocar borde): "
-            f"{candidatasPool[refSegId]['vol']:.2f} cm3."
-        )
+    def limpiarTemporal(self):
+        """Borra la carpeta temporal del .zip, si habia."""
+        if self._carpetaTemporal:
+            BloqueC.borrarTemporal(self._carpetaTemporal)
+            self._carpetaTemporal = None
 
-        # --- Filtro de proximidad física (descarta las lejanas) ---
-        aceptadas = {refSegId}
-        distanciasPorSegId = {refSegId: 0.0}
-        mascaraAceptada = candidatasPool[refSegId]["mask"].copy()
-        pendientes = {k: v for k, v in candidatasPool.items() if k != refSegId}
+    # -------- Paso 2 --------
+    def generarCraneo(self, volumeNode, modoPostop=False):
+        return self.bloqueA.generar(volumeNode, modoPostop=modoPostop)
 
-        if ndimage is not None and pendientes:
-            ronda = 0
-            while pendientes:
-                ronda += 1
-                mapaDistancia = ndimage.distance_transform_edt(
-                    ~mascaraAceptada, sampling=muestreoZYX
-                )
-                nuevas = {}
-                for segId, d in pendientes.items():
-                    distMin = float(mapaDistancia[d["mask"]].min())
-                    if distMin <= margenProximidadMM:
-                        nuevas[segId] = distMin
-                if not nuevas:
-                    break
-                for segId, distMin in nuevas.items():
-                    mascaraAceptada |= pendientes[segId]["mask"]
-                    aceptadas.add(segId)
-                    distanciasPorSegId[segId] = distMin
-                    del pendientes[segId]
-                print(f"CranioPlan:   ronda {ronda}: +{len(nuevas)} isla(s) por proximidad.")
-            if pendientes:
-                print(
-                    f"CranioPlan: {len(pendientes)} isla(s) descartada(s) por estar a más "
-                    f"de {margenProximidadMM:.0f} mm de la masa principal (lejos del cráneo)."
-                )
-        elif pendientes:
-            # Sin scipy no se puede medir proximidad; se aceptan todas las
-            # no-borde y el filtro de tamaño relativo hace la limpieza gruesa.
-            for segId in list(pendientes.keys()):
-                aceptadas.add(segId)
-                distanciasPorSegId[segId] = 0.0
+    def cambiarPiezaPrincipal(self, numero):
+        return self.bloqueA.redecidir(referenciaForzada=int(numero))
 
-        # --- Filtro de tamaño relativo (descarta las chicas) ---
-        volumenMayor = max(candidatasPool[segId]["vol"] for segId in aceptadas)
-        candidatasFinales = [
-            segId for segId in aceptadas
-            if candidatasPool[segId]["vol"] >= volumenMayor * umbralRelativo
-        ]
-        nDescartadasTamano = len(aceptadas) - len(candidatasFinales)
-        if nDescartadasTamano:
-            print(
-                f"CranioPlan: {nDescartadasTamano} isla(s) descartada(s) por tamaño "
-                f"(< {umbralRelativo:.0%} de la mayor, {volumenMayor:.2f} cm3)."
-            )
-
-        idsCandidatas = set(candidatasFinales)
-        for i in range(nSegments - 1, -1, -1):
-            segId = segmentacion.GetNthSegmentID(i)
-            if segId not in idsCandidatas:
-                segmentacion.RemoveSegment(segId)
-
-        print(
-            f"CranioPlan: {len(candidatasFinales)} pieza(s) candidata(s) "
-            "(pasaron borde + proximidad + tamaño). Se detiene para revisión manual."
-        )
-
-        islasRevision = []
-        coloresOriginales = {}
-        ordenadas = sorted(
-            candidatasFinales, key=lambda s: candidatasPool[s]["vol"], reverse=True
-        )
-        for idx, segId in enumerate(ordenadas, start=1):
-            vol = candidatasPool[segId]["vol"]
-            dist = distanciasPorSegId.get(segId, 0.0)
-            seg = segmentacion.GetSegment(segId)
-            seg.SetName(f"Pieza_{idx}")
-            coloresOriginales[segId] = seg.GetColor()
-            islasRevision.append({
-                "numero": idx, "segId": segId, "vol": vol, "dist": dist,
-                "alejada": False,
-            })
-            print(f"CranioPlan:   [{idx}] {vol:.2f} cm3 ({dist:.0f} mm de la masa principal).")
-
-        segmentationNode.CreateClosedSurfaceRepresentation()
-        segmentEditorWidget = None
-        slicer.mrmlScene.RemoveNode(segmentEditorNode)
-
-        return segmentationNode, islasRevision, coloresOriginales
-
-    def confirmarCraneo(self, segmentationNode, islasRevision, volumeNode):
-        """
-        BLOQUE B: fusiona las islas restantes en un único segmento
-        llamado "Craneo_Final".
-        """
-        if not islasRevision:
-            return False
-
-        segmentacion = segmentationNode.GetSegmentation()
-        idsRestantes = [isla["segId"] for isla in islasRevision]
-
-        if len(idsRestantes) > 1:
-            segmentEditorWidget = slicer.qMRMLSegmentEditorWidget()
-            segmentEditorWidget.setMRMLScene(slicer.mrmlScene)
-            segEditorNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLSegmentEditorNode')
-            segmentEditorWidget.setMRMLSegmentEditorNode(segEditorNode)
-            segmentEditorWidget.setSegmentationNode(segmentationNode)
-            segmentEditorWidget.setSourceVolumeNode(volumeNode)
-
-            primero = idsRestantes[0]
-            segmentEditorWidget.setCurrentSegmentID(primero)
-            segmentEditorWidget.setActiveEffectByName("Logical operators")
-            logicalEffect = segmentEditorWidget.activeEffect()
-
-            for otro in idsRestantes[1:]:
-                logicalEffect.setParameter("Operation", "UNION")
-                logicalEffect.setParameter("ModifierSegmentID", otro)
-                logicalEffect.self().onApply()
-                segmentacion.RemoveSegment(otro)
-
-            segmentacion.GetSegment(primero).SetName("Craneo_Final")
-            slicer.mrmlScene.RemoveNode(segEditorNode)
-            segmentEditorWidget = None
-        else:
-            segmentacion.GetSegment(idsRestantes[0]).SetName("Craneo_Final")
-
-        segmentationNode.CreateClosedSurfaceRepresentation()
-        return True
-
-    # ============================================================
-    # BLOQUE F — Planificación de osteotomías (corte propio,
-    # sin depender del Osteotomy Planner de KitwareMedical)
-    #
-    # Decisión de diseño (04/07/2026): se descarta el Curve Cut nativo
-    # de Dynamic Modeler (y por extensión el Osteotomy Planner) porque,
-    # probado con casos reales del Garrahan:
-    #   (a) confunde islas naturalmente desconectadas (suturas craneales
-    #       abiertas) con resultado de un corte.
-    #   (b) no garantiza atravesar el espesor real del hueso en cada
-    #       punto de la curva.
-    #
-    # SEGUIMIENTO DE IDENTIDAD (corrección de fondo 26/07/2026): la clave
-    # para distinguir "cráneo restante" de "fragmento extraído" NO es el
-    # tamaño (ranking por volumen), sino la IDENTIDAD de cada pieza. Ver
-    # el docstring de generarOsteotomia.
-    # ============================================================
-
-    def contarPiezasConectadas(self, polyData):
-        """Cantidad de componentes conectados de una malla."""
-        if polyData is None or polyData.GetNumberOfPoints() == 0:
-            return 0
-        conectividad = vtk.vtkPolyDataConnectivityFilter()
-        conectividad.SetInputData(polyData)
-        conectividad.SetExtractionModeToAllRegions()
-        conectividad.Update()
-        return int(conectividad.GetNumberOfExtractedRegions())
-
-    def _limpiarRuidoMalla(self, polyData, minimoPuntos=200):
-        """
-        Quita SOLO las regiones conectadas que son ruido de marching cubes
-        (menos de minimoPuntos puntos), preservando cualquier pieza ósea
-        sustancial aunque esté desconectada del resto (huesos separados por
-        suturas abiertas).
-
-        Diferencia clave con la versión anterior (que causaba el bug de
-        pérdida de hueso): el umbral es ABSOLUTO en cantidad de puntos,
-        calibrado al ruido de la conversión segmento->malla, NO relativo al
-        tamaño de la pieza mayor. Un umbral relativo (p. ej. 10% de la
-        mayor) borra un plato occipital chico legítimo por el solo hecho de
-        ser más chico que la bóveda; un umbral absoluto bajo solo elimina
-        specks de pocos puntos y deja intacta cualquier placa real.
-        """
-        if polyData is None or polyData.GetNumberOfPoints() == 0:
-            return polyData
-
-        conectividad = vtk.vtkPolyDataConnectivityFilter()
-        conectividad.SetInputData(polyData)
-        conectividad.SetExtractionModeToAllRegions()
-        conectividad.ColorRegionsOn()
-        conectividad.Update()
-        numeroRegiones = int(conectividad.GetNumberOfExtractedRegions())
-
-        if numeroRegiones <= 1:
-            limpiar = vtk.vtkCleanPolyData()
-            limpiar.SetInputData(polyData)
-            limpiar.Update()
-            salida = vtk.vtkPolyData()
-            salida.DeepCopy(limpiar.GetOutput())
-            return salida
-
-        arrayRegiones = conectividad.GetOutput().GetPointData().GetArray("RegionId")
-        if arrayRegiones is None:
-            return polyData
-
-        conteo = {}
-        for i in range(arrayRegiones.GetNumberOfTuples()):
-            rid = int(arrayRegiones.GetTuple1(i))
-            conteo[rid] = conteo.get(rid, 0) + 1
-
-        aConservar = [rid for rid, c in conteo.items() if c >= minimoPuntos]
-        if not aConservar:
-            # Todo cae bajo el umbral: conservamos la mayor para no vaciar.
-            aConservar = [max(conteo, key=conteo.get)]
-
-        conectividad.SetExtractionModeToSpecifiedRegions()
-        conectividad.InitializeSpecifiedRegionList()
-        for rid in aConservar:
-            conectividad.AddSpecifiedRegion(rid)
-        conectividad.Update()
-
-        limpiar = vtk.vtkCleanPolyData()
-        limpiar.SetInputConnection(conectividad.GetOutputPort())
-        limpiar.Update()
-
-        salida = vtk.vtkPolyData()
-        salida.DeepCopy(limpiar.GetOutput())
-
-        print(
-            f"CranioPlan: limpieza de malla — {numeroRegiones} regiones -> "
-            f"{len(aConservar)} conservada(s) (umbral absoluto {minimoPuntos} puntos)."
-        )
-        return salida
-
-    def _decimarMalla(self, polyData, reduccion):
-        """
-        Reduce la cantidad de triángulos de una malla, preservando la
-        topología (no abre agujeros ni separa piezas).
-
-        reduccion: fracción de triángulos a eliminar (0.0 a 1.0).
-        0.0 desactiva la decimación.
-        """
-        if not reduccion or reduccion <= 0.0 or polyData is None:
-            return polyData
-        if polyData.GetNumberOfCells() == 0:
-            return polyData
-
-        decimador = vtk.vtkDecimatePro()
-        decimador.SetInputData(polyData)
-        decimador.SetTargetReduction(reduccion)
-        decimador.PreserveTopologyOn()
-        decimador.Update()
-
-        resultado = vtk.vtkPolyData()
-        resultado.DeepCopy(decimador.GetOutput())
-
-        if resultado.GetNumberOfPoints() == 0:
-            return polyData  # la decimación falló; devolvemos la original
+    def confirmarCraneo(self):
+        resultado = self.bloqueA.confirmarCraneo()
+        if resultado is None:
+            return None
+        modelo = self.bloqueA.enviarAPlanner()
+        if modelo is None:
+            return None
+        ok, lineas = self.bloqueA.verificarCompatibilidad()
+        for l in lineas:
+            self.log("CranioPlan: " + l)
+        if not ok:
+            return None
         return resultado
 
-    def crearModeloDesdePolyData(self, polyData, nombre, color):
+    # -------- Paso 3 --------
+    def nuevaCurvaDeCorte(self, indice):
         """
-        Crea un vtkMRMLModelNode a partir de un vtkPolyData, con nombre
-        único (GenerateUniqueName) y color/visualización estándar.
+        Crea una curva ABIERTA para una osteotomia.
+
+        Solo abiertas: el lazo cerrado del Bloque F sigue soportado en el
+        codigo, pero no se ofrece en la interfaz porque en la practica todas
+        las osteotomias se trazan como lineas y tener las dos opciones era una
+        forma mas de equivocarse.
         """
-        if polyData is None or polyData.GetNumberOfPoints() == 0:
-            return None
-        nombreUnico = slicer.mrmlScene.GenerateUniqueName(nombre)
-        nodo = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLModelNode', nombreUnico)
-        nodo.SetAndObservePolyData(polyData)
-        nodo.CreateDefaultDisplayNodes()
-        nodo.GetDisplayNode().SetColor(*color)
-        nodo.GetDisplayNode().SetScalarVisibility(False)
-        return nodo
-
-    def exportarSegmentoAModelo(self, segmentationNode, nombreSegmento="Craneo_Final",
-                                  reduccionMalla=0.7):
-        """
-        Exporta un segmento a un vtkMRMLModelNode.
-
-        Corrección 26/07/2026: la limpieza de malla ya NO usa un umbral
-        RELATIVO (que borraba placas óseas chicas legítimas, causando la
-        desaparición del hueso occipital al confirmar). Ahora usa
-        _limpiarRuidoMalla con umbral absoluto, que solo quita specks de
-        marching cubes y conserva todas las placas reales aunque estén
-        desconectadas por suturas abiertas.
-
-        reduccionMalla (0.0 a 1.0): fracción de triángulos a eliminar para
-        aligerar el render. 0.0 desactiva la decimación.
-        """
-        segmentacion = segmentationNode.GetSegmentation()
-        segId = segmentacion.GetSegmentIdBySegmentName(nombreSegmento)
-        if not segId:
-            return None
-
-        segmentationNode.CreateClosedSurfaceRepresentation()
-        polyDataBruto = vtk.vtkPolyData()
-        segmentationNode.GetClosedSurfaceRepresentation(segId, polyDataBruto)
-
-        if polyDataBruto is None or polyDataBruto.GetNumberOfPoints() == 0:
-            return None
-
-        polyData = self._limpiarRuidoMalla(polyDataBruto, minimoPuntos=200)
-        if polyData is None or polyData.GetNumberOfPoints() == 0:
-            return None
-
-        trianguloAntes = polyData.GetNumberOfCells()
-        polyData = self._decimarMalla(polyData, reduccionMalla)
-
-        print(
-            f"CranioPlan: malla del cráneo — {trianguloAntes} triángulos antes de "
-            f"decimar, {polyData.GetNumberOfCells()} después."
-        )
-
-        modeloNode = slicer.mrmlScene.AddNewNodeByClass(
-            'vtkMRMLModelNode', nombreSegmento + '_Modelo'
-        )
-        modeloNode.SetAndObservePolyData(polyData)
-        modeloNode.CreateDefaultDisplayNodes()
-        modeloNode.GetDisplayNode().SetColor(0.9, 0.8, 0.6)
-        modeloNode.GetDisplayNode().SetScalarVisibility(False)
-        return modeloNode
-
-    def _resamplearPuntos(self, puntosOriginales, distanciaMuestreoMM):
-        """
-        Recorre la polilínea de una curva y devuelve puntos (numpy arrays)
-        espaciados uniformemente cada distanciaMuestreoMM. Implementación
-        propia, sin depender de utilidades internas de Slicer.
-        """
-        n = puntosOriginales.GetNumberOfPoints()
-        if n < 2:
-            return []
-
-        original = [np.array(puntosOriginales.GetPoint(i)) for i in range(n)]
-
-        resampleados = [original[0]]
-        distanciaAcumulada = 0.0
-        puntoAnterior = original[0]
-
-        for i in range(1, n):
-            puntoActual = original[i]
-            segmento = puntoActual - puntoAnterior
-            largoSegmento = np.linalg.norm(segmento)
-
-            while distanciaAcumulada + largoSegmento >= distanciaMuestreoMM:
-                falta = distanciaMuestreoMM - distanciaAcumulada
-                direccion = segmento / largoSegmento if largoSegmento > 1e-9 else segmento
-                nuevoPunto = puntoAnterior + direccion * falta
-                resampleados.append(nuevoPunto)
-                puntoAnterior = nuevoPunto
-                segmento = puntoActual - puntoAnterior
-                largoSegmento = np.linalg.norm(segmento)
-                distanciaAcumulada = 0.0
-
-            distanciaAcumulada += largoSegmento
-            puntoAnterior = puntoActual
-
-        if np.linalg.norm(resampleados[-1] - original[-1]) > 1e-6:
-            resampleados.append(original[-1])
-
-        return resampleados
-
-    def _normalPromedioEnPunto(self, punto, pointLocator, normalesArray, radioMM=3.0):
-        """
-        Normal de superficie promediada sobre los vértices dentro de un
-        radio, en vez de tomar la de una sola celda (más estable sobre
-        mallas de marching cubes).
-        """
-        listaIds = vtk.vtkIdList()
-        pointLocator.FindPointsWithinRadius(radioMM, punto.tolist(), listaIds)
-
-        if listaIds.GetNumberOfIds() == 0:
-            idCercano = pointLocator.FindClosestPoint(punto.tolist())
-            if idCercano < 0:
-                return None
-            listaIds.InsertNextId(idCercano)
-
-        acumulado = np.zeros(3)
-        for j in range(listaIds.GetNumberOfIds()):
-            acumulado += np.array(normalesArray.GetTuple3(listaIds.GetId(j)))
-
-        norma = np.linalg.norm(acumulado)
-        if norma < 1e-6:
-            idCercano = pointLocator.FindClosestPoint(punto.tolist())
-            if idCercano < 0:
-                return None
-            normal = np.array(normalesArray.GetTuple3(idCercano))
-            norma = np.linalg.norm(normal)
-            return normal / norma if norma > 1e-9 else None
-
-        return acumulado / norma
-
-    def _medirEspesorLocal(self, punto, normal, cellLocator, distanciaMaximaMM=12.0):
-        """
-        Espesor de hueso bajo un punto: lanza un rayo hacia adentro
-        siguiendo la normal y mide dónde choca con la tabla interna.
-        """
-        inicioRayo = punto + normal * 1.0   # 1 mm afuera, evita auto-interseccion
-        finRayo = punto - normal * distanciaMaximaMM
-
-        t = vtk.mutable(0.0)
-        xInterseccion = [0.0, 0.0, 0.0]
-        pcoords = [0.0, 0.0, 0.0]
-        subId = vtk.mutable(0)
-
-        hubo = cellLocator.IntersectWithLine(
-            inicioRayo.tolist(), finRayo.tolist(), 0.01,
-            t, xInterseccion, pcoords, subId
-        )
-        if hubo:
-            return float(np.linalg.norm(np.array(xInterseccion) - punto))
-        return distanciaMaximaMM
-
-    def _quitarPuntosCoincidentes(self, posiciones, esCerrada, toleranciaMM=0.2):
-        """
-        Elimina puntos consecutivos que están (casi) en la misma posición.
-        Un tramo de longitud cero rompe el cálculo de la tangente (NaN) y
-        arruina la pared de corte sin disparar ningún error.
-        """
-        limpias = []
-        for p in posiciones:
-            if not limpias or np.linalg.norm(p - limpias[-1]) > toleranciaMM:
-                limpias.append(p)
-
-        if esCerrada and len(limpias) > 2:
-            if np.linalg.norm(limpias[-1] - limpias[0]) <= toleranciaMM:
-                limpias.pop()
-
-        return limpias
-
-    def _construirParedDeCorte(self, curvaNode, mallaHueso, grosorMM,
-                                 margenSeguridadMM, esCerrada,
-                                 distanciaMuestreoMM=1.0,
-                                 radioNormalMM=3.0):
-        """
-        Construye la pared de corte (sólido delgado) que sigue la curva de
-        osteotomía, atravesando el espesor real del hueso en cada punto, con
-        el grosor de hoja configurado.
-
-        mallaHueso es un vtkPolyData: el hueso remanente actual (puede tener
-        varias piezas conexas). La pared se calcula contra ese hueso.
-        """
-        puntosCurvaOriginal = curvaNode.GetCurvePointsWorld()
-        if puntosCurvaOriginal is None or puntosCurvaOriginal.GetNumberOfPoints() < 2:
-            return None
-
-        posiciones = self._resamplearPuntos(puntosCurvaOriginal, distanciaMuestreoMM)
-        posiciones = self._quitarPuntosCoincidentes(posiciones, esCerrada)
-        n = len(posiciones)
-
-        minimoPuntos = 3 if esCerrada else 2
-        if n < minimoPuntos:
-            print(
-                f"CranioPlan DIAGNÓSTICO: solo {n} punto(s) útiles tras resamplear y "
-                f"quitar coincidentes (mínimo {minimoPuntos} para una curva "
-                f"{'cerrada' if esCerrada else 'abierta'})."
-            )
-            return None
-        print(
-            f"CranioPlan DIAGNÓSTICO: curva {'cerrada' if esCerrada else 'abierta'} "
-            f"resampleada a {n} puntos útiles."
-        )
-
-        normalesFilter = vtk.vtkPolyDataNormals()
-        normalesFilter.SetInputData(mallaHueso)
-        normalesFilter.ComputePointNormalsOn()
-        normalesFilter.ComputeCellNormalsOff()
-        normalesFilter.SplittingOff()
-        normalesFilter.ConsistencyOn()
-        normalesFilter.AutoOrientNormalsOn()
-        normalesFilter.Update()
-        mallaConNormales = normalesFilter.GetOutput()
-
-        normalesArray = mallaConNormales.GetPointData().GetNormals()
-        if normalesArray is None:
-            print("CranioPlan DIAGNOSTICO: no se pudieron calcular normales del hueso.")
-            return None
-
-        pointLocator = vtk.vtkPointLocator()
-        pointLocator.SetDataSet(mallaConNormales)
-        pointLocator.BuildLocator()
-
-        cellLocator = vtk.vtkCellLocator()
-        cellLocator.SetDataSet(mallaConNormales)
-        cellLocator.BuildLocator()
-
-        normales = []
-        espesores = []
-        for i in range(n):
-            normal = self._normalPromedioEnPunto(
-                posiciones[i], pointLocator, normalesArray, radioNormalMM
-            )
-            if normal is None:
-                print(
-                    f"CranioPlan DIAGNOSTICO: no se pudo calcular la normal en el "
-                    f"punto {i} de {n}. Se aborta la pared de corte."
-                )
-                return None
-            normales.append(normal)
-            espesores.append(
-                self._medirEspesorLocal(posiciones[i], normal, cellLocator)
-            )
-
-        lateralesCrudos = []
-        for i in range(n):
-            if esCerrada:
-                tangente = posiciones[(i + 1) % n] - posiciones[(i - 1) % n]
-            elif i == 0:
-                tangente = posiciones[1] - posiciones[0]
-            elif i == n - 1:
-                tangente = posiciones[n - 1] - posiciones[n - 2]
-            else:
-                tangente = posiciones[i + 1] - posiciones[i - 1]
-
-            normaTangente = np.linalg.norm(tangente)
-            if normaTangente < 1e-9:
-                print(
-                    f"CranioPlan DIAGNÓSTICO: tangente degenerada en el punto {i} de {n} "
-                    "(puntos coincidentes). Se aborta la pared de corte."
-                )
-                return None
-            tangente = tangente / normaTangente
-
-            lateral = np.cross(tangente, normales[i])
-            normaLateral = np.linalg.norm(lateral)
-            if normaLateral < 1e-6:
-                referencia = np.array([1.0, 0.0, 0.0])
-                if abs(np.dot(referencia, normales[i])) > 0.9:
-                    referencia = np.array([0.0, 1.0, 0.0])
-                lateral = np.cross(referencia, normales[i])
-                normaLateral = np.linalg.norm(lateral)
-            lateralesCrudos.append(lateral / normaLateral)
-
-        # Corrección de continuidad de signo (evita el twist de la pared).
-        laterales = [lateralesCrudos[0]]
-        for i in range(1, n):
-            actual = lateralesCrudos[i]
-            if float(np.dot(actual, laterales[i - 1])) < 0:
-                actual = -actual
-            laterales.append(actual)
-
-        if esCerrada and float(np.dot(laterales[-1], laterales[0])) < 0:
-            print(
-                "CranioPlan DIAGNOSTICO: el lazo tiene un twist impar. La pared puede "
-                "quedar irregular en el punto de cierre; revisa que la curva no se cruce."
-            )
-
-        puntosSolido = vtk.vtkPoints()
-        PROFUNDIDAD_MAXIMA_MM = 8.0
-        for i in range(n):
-            p = posiciones[i]
-            normal = normales[i]
-            lateral = laterales[i]
-            profundidad = min(espesores[i] + margenSeguridadMM, PROFUNDIDAD_MAXIMA_MM)
-            mitadGrosor = grosorMM / 2.0
-
-            topLeft = p + normal * profundidad + lateral * mitadGrosor
-            topRight = p + normal * profundidad - lateral * mitadGrosor
-            bottomRight = p - normal * profundidad - lateral * mitadGrosor
-            bottomLeft = p - normal * profundidad + lateral * mitadGrosor
-
-            puntosSolido.InsertNextPoint(topLeft.tolist())
-            puntosSolido.InsertNextPoint(topRight.tolist())
-            puntosSolido.InsertNextPoint(bottomRight.tolist())
-            puntosSolido.InsertNextPoint(bottomLeft.tolist())
-
-        triangulos = vtk.vtkCellArray()
-
-        def indice(i, esquina):
-            return 4 * i + esquina
-
-        def agregarCuad(a, b, c, d):
-            t1 = vtk.vtkTriangle()
-            t1.GetPointIds().SetId(0, a)
-            t1.GetPointIds().SetId(1, b)
-            t1.GetPointIds().SetId(2, c)
-            triangulos.InsertNextCell(t1)
-            t2 = vtk.vtkTriangle()
-            t2.GetPointIds().SetId(0, a)
-            t2.GetPointIds().SetId(1, c)
-            t2.GetPointIds().SetId(2, d)
-            triangulos.InsertNextCell(t2)
-
-        rangoSegmentos = range(n) if esCerrada else range(n - 1)
-
-        for i in rangoSegmentos:
-            j = (i + 1) % n
-            agregarCuad(indice(i, 0), indice(i, 1), indice(j, 1), indice(j, 0))
-            agregarCuad(indice(i, 1), indice(i, 2), indice(j, 2), indice(j, 1))
-            agregarCuad(indice(i, 2), indice(i, 3), indice(j, 3), indice(j, 2))
-            agregarCuad(indice(i, 3), indice(i, 0), indice(j, 0), indice(j, 3))
-
-        if not esCerrada:
-            agregarCuad(indice(0, 0), indice(0, 1), indice(0, 2), indice(0, 3))
-            ultimo = n - 1
-            agregarCuad(indice(ultimo, 3), indice(ultimo, 2), indice(ultimo, 1), indice(ultimo, 0))
-
-        paredBruta = vtk.vtkPolyData()
-        paredBruta.SetPoints(puntosSolido)
-        paredBruta.SetPolys(triangulos)
-
-        limpiar = vtk.vtkCleanPolyData()
-        limpiar.SetInputData(paredBruta)
-        limpiar.Update()
-
-        triangular = vtk.vtkTriangleFilter()
-        triangular.SetInputConnection(limpiar.GetOutputPort())
-        triangular.Update()
-
-        corregirNormales = vtk.vtkPolyDataNormals()
-        corregirNormales.SetInputConnection(triangular.GetOutputPort())
-        corregirNormales.ConsistencyOn()
-        corregirNormales.AutoOrientNormalsOn()
-        corregirNormales.SplittingOff()
-        corregirNormales.Update()
-
-        return corregirNormales.GetOutput()
-
-    def _anilloDeCorteEnVoxeles(self, boneMask, curvaNode, mallaHueso, volumeNode,
-                                 grosorMM, margenSeguridadMM, esCerrada,
-                                 distanciaMuestreoMM=0.5, radioNormalMM=3.0):
-        """
-        Construye el anillo (curva cerrada) o canal (curva abierta) de corte
-        DIRECTAMENTE en el espacio de vóxeles, en vez de mallar un tubo fino
-        y esperar que la vóxelización lo llene. Por cada punto de la curva se
-        barre a lo largo de la normal del hueso (para atravesar todo el
-        espesor) y luego se dilata el resultado el grosor de hoja. Así el
-        anillo es continuo por construcción: inmune al 'twist' del lazo y a
-        los huecos por aliasing, que eran la causa de que el disco no se
-        separara.
-
-        Devuelve una máscara booleana (misma forma que boneMask) con los
-        vóxeles de HUESO a quitar, o None si no se pudo construir.
-        """
-        from scipy import ndimage
-
-        puntosCurva = curvaNode.GetCurvePointsWorld()
-        if puntosCurva is None or puntosCurva.GetNumberOfPoints() < 2:
-            return None
-
-        posiciones = self._resamplearPuntos(puntosCurva, distanciaMuestreoMM)
-        posiciones = self._quitarPuntosCoincidentes(posiciones, esCerrada)
-        posiciones = list(posiciones)
-        if esCerrada and len(posiciones) >= 3:
-            posiciones.append(posiciones[0])  # cerrar el lazo explícitamente
-        n = len(posiciones)
-        if n < 2:
-            return None
-        print(
-            f"CranioPlan DIAGNÓSTICO: curva {'cerrada' if esCerrada else 'abierta'} "
-            f"resampleada a {n} puntos para el barrido en vóxeles."
-        )
-
-        # Normales del hueso (para barrer a lo largo del espesor).
-        normalesFilter = vtk.vtkPolyDataNormals()
-        normalesFilter.SetInputData(mallaHueso)
-        normalesFilter.ComputePointNormalsOn()
-        normalesFilter.ComputeCellNormalsOff()
-        normalesFilter.SplittingOff()
-        normalesFilter.ConsistencyOn()
-        normalesFilter.AutoOrientNormalsOn()
-        normalesFilter.Update()
-        mallaN = normalesFilter.GetOutput()
-        normalesArray = mallaN.GetPointData().GetNormals()
-        if normalesArray is None:
-            print("CranioPlan DIAGNÓSTICO: no se pudieron calcular normales del hueso.")
-            return None
-        pointLocator = vtk.vtkPointLocator()
-        pointLocator.SetDataSet(mallaN)
-        pointLocator.BuildLocator()
-
-        rasToIjk = vtk.vtkMatrix4x4()
-        volumeNode.GetRASToIJKMatrix(rasToIjk)
-
-        dims = boneMask.shape  # (z, y, x)
-        espaciado = volumeNode.GetSpacing()
-        pasoMM = max(min(espaciado) * 0.5, 0.1)
-        PROFUNDIDAD_MM = 8.0  # perpendicular al hueso: no ensancha el corte,
-                              #  solo garantiza atravesar el espesor completo
-
-        # --- Dirección de extrusión por punto: normal local SUAVIZADA ---
-        # Extruir a lo largo de la normal local (perpendicular al hueso)
-        # mantiene el corte fino y pegado a la línea trazada. Pero las normales
-        # crudas cerca de huecos/zonas finas tienen picos que producían gubias
-        # anchas (sobre todo en curvas abiertas). Se suavizan con un promedio
-        # móvil a lo largo de la curva: se conserva la curvatura general y se
-        # matan los picos. Reemplaza al 'eje global' anterior, que cortaba de
-        # más en las zonas inclinadas.
-        normalesPunto = []
-        for p in posiciones:
-            normalesPunto.append(
-                self._normalPromedioEnPunto(p, pointLocator, normalesArray, radioNormalMM)
-            )
-
-        indicesValidos = [i for i, nrm in enumerate(normalesPunto) if nrm is not None]
-        if not indicesValidos:
-            print("CranioPlan DIAGNÓSTICO: no se pudo calcular ninguna normal sobre la curva.")
-            return None
-        # Rellenar faltantes con la normal válida más cercana.
-        for i in range(n):
-            if normalesPunto[i] is None:
-                j = min(indicesValidos, key=lambda k: abs(k - i))
-                normalesPunto[i] = np.array(normalesPunto[j])
-
-        # Alinear todas al sentido medio (evita promediar normales opuestas).
-        media = np.zeros(3)
-        for i in indicesValidos:
-            media = media + normalesPunto[i]
-        if np.linalg.norm(media) > 1e-9:
-            media = media / np.linalg.norm(media)
-            for i in range(n):
-                if float(np.dot(normalesPunto[i], media)) < 0:
-                    normalesPunto[i] = -normalesPunto[i]
-
-        # Promedio móvil a lo largo de la curva (circular si es cerrada).
-        ventana = 3  # a cada lado => 7 puntos ~ 3 mm
-        normalesSuaves = []
-        for i in range(n):
-            acum = np.zeros(3)
-            for d in range(-ventana, ventana + 1):
-                if esCerrada:
-                    k = (i + d) % n
-                else:
-                    k = min(max(i + d, 0), n - 1)
-                acum = acum + normalesPunto[k]
-            norma = np.linalg.norm(acum)
-            normalesSuaves.append(acum / norma if norma > 1e-9 else normalesPunto[i])
-
-        curtain = np.zeros(dims, dtype=bool)
-
-        def marcar(rasXYZ):
-            ijk = [0.0, 0.0, 0.0, 0.0]
-            rasToIjk.MultiplyPoint([float(rasXYZ[0]), float(rasXYZ[1]), float(rasXYZ[2]), 1.0], ijk)
-            ii = int(round(ijk[0]))
-            jj = int(round(ijk[1]))
-            kk = int(round(ijk[2]))
-            if 0 <= kk < dims[0] and 0 <= jj < dims[1] and 0 <= ii < dims[2]:
-                curtain[kk, jj, ii] = True
-
-        for i, p in enumerate(posiciones):
-            direccion = normalesSuaves[i]
-            t = -PROFUNDIDAD_MM
-            while t <= PROFUNDIDAD_MM:
-                marcar(np.asarray(p, dtype=float) + direccion * t)
-                t += pasoMM
-
-        if not curtain.any():
-            return None
-
-        # Dilatar el grosor de hoja (kerf). Estructura 3x3x3 (26-conexa): es
-        # la que garantiza un anillo CONTINUO sin huecos diagonales sobre la
-        # trayectoria curva. La 6-conexa dejaba fugas de 1 vóxel y el disco no
-        # se separaba. El ancho lateral queda ~1.5 mm; el corte ya es preciso
-        # porque la extrusión es perpendicular al hueso (sin inclinación).
-        radioVox = max(1, int(round((grosorMM / 2.0) / min(espaciado))))
-        estructura = np.ones((3, 3, 3), dtype=bool)
-        curtainDil = ndimage.binary_dilation(curtain, structure=estructura, iterations=radioVox)
-
-        anillo = np.logical_and(curtainDil, boneMask)
-        if not anillo.any():
-            return None
-        return anillo
-
-    def _centroideRASDeMascara(self, mascara, volumeNode):
-        """Centroide en coordenadas RAS de una máscara booleana (en la
-        geometría del volumeNode). Devuelve np.array([x, y, z]) o None."""
-        indices = np.argwhere(mascara)  # columnas z, y, x
-        if indices.shape[0] == 0:
-            return None
-        cen = indices.mean(axis=0)  # [zc, yc, xc]
-        ijk = [float(cen[2]), float(cen[1]), float(cen[0]), 1.0]  # x, y, z, 1
-        m = vtk.vtkMatrix4x4()
-        volumeNode.GetIJKToRASMatrix(m)
-        ras = [0.0, 0.0, 0.0, 0.0]
-        m.MultiplyPoint(ijk, ras)
-        return np.array(ras[:3])
-
-    def _puntoDentroDelLazo(self, puntoRAS, puntosLazoRAS):
-        """
-        True si puntoRAS cae DENTRO del lazo cerrado definido por
-        puntosLazoRAS (lista de np.array Nx3), proyectando ambos al plano de
-        mejor ajuste del lazo y haciendo un test punto-en-polígono 2D.
-
-        Se usa para identificar, SIN depender del tamaño, qué piezas quedaron
-        encerradas por una osteotomía de curva cerrada (el flap) frente a las
-        que quedaron afuera (el resto del cráneo). Es robusto aunque el flap
-        sea muy chico, que es donde el criterio por volumen fallaba.
-        """
-        pts = np.asarray(puntosLazoRAS, dtype=float)
-        if pts.shape[0] < 3:
-            return False
-        c0 = pts.mean(axis=0)
-        # Los dos vectores singulares de mayor varianza definen el plano del
-        # lazo; el tercero es la normal (que no usamos).
-        _, _, vh = np.linalg.svd(pts - c0)
-        u = vh[0]
-        v = vh[1]
-        poligono = np.array([[(p - c0).dot(u), (p - c0).dot(v)] for p in pts])
-        q = np.array([(puntoRAS - c0).dot(u), (puntoRAS - c0).dot(v)])
-
-        dentro = False
-        n = len(poligono)
-        j = n - 1
-        for i in range(n):
-            xi, yi = poligono[i]
-            xj, yj = poligono[j]
-            if ((yi > q[1]) != (yj > q[1])) and \
-               (q[0] < (xj - xi) * (q[1] - yi) / (yj - yi + 1e-12) + xi):
-                dentro = not dentro
-            j = i
-        return dentro
-
-    def _puntosDentroPoligono2D(self, P, poligono):
-        """Vectorizado: para P (Nx2) devuelve un bool array indicando si cada
-        punto cae dentro del polígono (Mx2), por ray casting."""
-        x = P[:, 0]
-        y = P[:, 1]
-        dentro = np.zeros(len(P), dtype=bool)
-        n = len(poligono)
-        j = n - 1
-        for i in range(n):
-            xi, yi = poligono[i]
-            xj, yj = poligono[j]
-            cond = ((yi > y) != (yj > y)) & \
-                   (x < (xj - xi) * (y - yi) / ((yj - yi) + 1e-12) + xi)
-            dentro = np.logical_xor(dentro, cond)
-            j = i
-        return dentro
-
-    def _particionPorPrismaDelLazo(self, boneMask, loopRAS, volumeNode, slabMM=25.0):
-        """
-        Parte el hueso (boneMask) en (flapMask, restanteMask) según el PRISMA
-        del lazo cerrado: un vóxel pertenece al flap si su proyección cae
-        DENTRO del polígono del lazo (proyectado a su plano de mejor ajuste) Y
-        está a menos de ±slabMM del plano. Todo lo demás va al restante.
-
-        Es una partición puramente GEOMÉTRICA: no usa conectividad, así que
-        SIEMPRE separa correctamente el hueso encerrado por el lazo, aunque el
-        anillo de corte no lo haya desconectado (que es lo que fallaba cerca de
-        los agujeros/suturas abiertas, donde quedaban puentes de hueso).
-
-        La franja ±slabMM evita que el prisma (infinito) capture hueso de la
-        pared opuesta del cráneo que quede sobre el mismo eje.
-        """
-        pts = np.asarray(loopRAS, dtype=float)
-        if pts.shape[0] < 3:
-            return None, None
-        c0 = pts.mean(axis=0)
-        _, _, vh = np.linalg.svd(pts - c0)
-        u = vh[0]
-        v = vh[1]
-        eje = vh[2]
-        poligono = np.column_stack([(pts - c0) @ u, (pts - c0) @ v])
-
-        indices = np.argwhere(boneMask)  # N x 3 (z, y, x)
-        if indices.shape[0] == 0:
-            return None, None
-
-        M = vtk.vtkMatrix4x4()
-        volumeNode.GetIJKToRASMatrix(M)
-        Mnp = np.array([[M.GetElement(r, c) for c in range(4)] for r in range(4)])
-        # IJK homogéneo por vóxel: (i=x, j=y, k=z, 1)
-        ijk = np.column_stack([
-            indices[:, 2], indices[:, 1], indices[:, 0], np.ones(len(indices))
-        ]).astype(float)
-        ras = (ijk @ Mnp.T)[:, :3]
-
-        rel = ras - c0
-        s = rel @ eje
-        a = rel @ u
-        b = rel @ v
-        enSlab = np.abs(s) <= slabMM
-        dentroPoli = self._puntosDentroPoligono2D(np.column_stack([a, b]), poligono)
-        esFlap = enSlab & dentroPoli
-
-        flapMask = np.zeros_like(boneMask)
-        restMask = np.zeros_like(boneMask)
-        zc = indices[:, 0]
-        yc = indices[:, 1]
-        xc = indices[:, 2]
-        flapMask[zc[esFlap], yc[esFlap], xc[esFlap]] = True
-        noFlap = ~esFlap
-        restMask[zc[noFlap], yc[noFlap], xc[noFlap]] = True
-        return flapMask, restMask
-
-    def generarOsteotomia(self, mallaRemanente, curvaNode, volumeNode,
-                            indiceInicialFragmento=1,
-                            grosorMM=1.0, margenSeguridadMM=3.0,
-                            volumenMinimoFragmentoMM3=300.0,
-                            reduccionMallaFragmentos=0.7):
-        """
-        Ejecuta un corte de osteotomía sobre el cráneo remanente.
-
-        mallaRemanente: vtkPolyData con TODO el hueso que todavía no se
-        extrajo (el cráneo restante actual). Puede tener varias piezas
-        conexas (placas separadas por suturas abiertas). El corte se aplica
-        solo sobre este hueso.
-
-        SEGUIMIENTO DE IDENTIDAD — corrección de fondo (26/07/2026):
-        --------------------------------------------------------------
-        El bug de raíz de todas las versiones anteriores era decidir "qué es
-        cráneo restante" y "qué es fragmento extraído" por TAMAÑO: la pieza
-        más grande = restante, todas las demás = extraídas. Eso está mal
-        porque un cráneo pediátrico ya viene partido en varias placas
-        grandes ANTES de cortar (suturas abiertas). El ranking por tamaño
-        tomaba esas placas naturales y las llamaba "fragmentos extraídos",
-        aunque el corte nunca las tocó.
-
-        La solución correcta es rastrear la IDENTIDAD de cada pieza:
-          1. Se voxeliza el hueso de entrada y se etiquetan sus componentes
-             conexos ANTES de cortar (scipy.ndimage.label -> "piezas madre").
-          2. Se resta la pared de corte (solo QUITA vóxeles) y se re-separan
-             las islas -> "piezas hija".
-          3. Como restar solo quita vóxeles, cada hija es subconjunto de
-             exactamente una madre. Se mapea cada hija a su madre por la
-             etiqueta mayoritaria bajo su máscara.
-          4. Por cada madre:
-               - si produjo <=1 hija real -> el corte NO la separó: va
-                 ENTERA al cráneo restante (aunque no sea la más grande).
-               - si produjo >=2 hijas reales -> el corte SÍ la separó: la
-                 mayor queda en el restante, las otras son flaps extraídos,
-                 y las esquirlas (< volumenMinimoFragmentoMM3) vuelven al
-                 restante (conserva el volumen óseo).
-          5. Craneo_restante = unión (vtkAppendPolyData) de todas las piezas
-             del bucket restante, en UN solo modelo (puede tener varias
-             placas). Un modelo Fragmento_extraido por flap.
-
-        Así, con un único corte de lazo cerrado sobre una placa, el
-        resultado es exactamente: 1 fragmento extraído + el resto del cráneo
-        (todas las demás placas + el remanente de la placa cortada), sin
-        importar cuántas placas naturales haya ni cuál sea la más grande.
-
-        indiceInicialFragmento: número con el que arranca la numeración de
-        los fragmentos de ESTE corte (para que en cortes sucesivos los
-        nombres sigan la cuenta: Fragmento_extraido_1, _2, _3, ...).
-
-        volumenMinimoFragmentoMM3: umbral absoluto (300 mm³ = 0.3 cm³ por
-        defecto) para distinguir un flap real de una esquirla de la
-        vóxelización. Provisional: falta validar con más casos del Garrahan
-        que no descarte un fragmento pediátrico legítimamente chico.
-
-        MOTOR DE CORTE: resta volumétrica (por vóxeles) con el Segment
-        Editor, no booleano de mallas (vtkBooleanOperationPolyDataFilter
-        falla sistemáticamente en mallas craneales reales). Precisión
-        limitada al vóxel (0.5 mm), más fino que el grosor de hoja (~1 mm).
-
-        Devuelve un dict:
-          {"restante": modelNode, "fragmentos": [modelNode, ...],
-           "piezasCreadas": int, "piezasAntes": int}
-        o None si el corte no se pudo calcular.
-        """
-        print(f"CranioPlan {CRANIOPLAN_VERSION}: Bloque F (generarOsteotomia).")
-
-        if mallaRemanente is None or curvaNode is None or volumeNode is None:
-            print("CranioPlan DIAGNÓSTICO: falta el hueso, la curva o el volumen.")
-            return None
-        if mallaRemanente.GetNumberOfPoints() == 0:
-            print("CranioPlan DIAGNÓSTICO: la malla de hueso remanente está vacía.")
-            return None
-
-        try:
-            from scipy import ndimage
-        except ImportError:
-            print(
-                "CranioPlan DIAGNÓSTICO: scipy no está disponible. El seguimiento de "
-                "identidad de piezas lo necesita; sin él no se puede distinguir un flap "
-                "real de una placa natural. Se aborta el corte."
-            )
-            return None
-
-        esCerrada = bool(curvaNode.IsA("vtkMRMLMarkupsClosedCurveNode"))
-        print(
-            f"CranioPlan DIAGNÓSTICO: curva {curvaNode.GetClassName()} -> "
-            f"{'CERRADA' if esCerrada else 'ABIERTA'}."
-        )
-
-        piezasAntesMalla = self.contarPiezasConectadas(mallaRemanente)
-        print(
-            f"CranioPlan: hueso remanente de entrada — {piezasAntesMalla} pieza(s) "
-            "conexa(s) según la malla."
-        )
-
-        # --- Segmentación temporal donde se hace el corte por vóxeles ---
-        segCorte = slicer.mrmlScene.AddNewNodeByClass(
-            'vtkMRMLSegmentationNode', 'CranioPlan_Corte_Temporal'
-        )
-        segCorte.CreateDefaultDisplayNodes()
-        segCorte.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
-
-        idHueso = segCorte.AddSegmentFromClosedSurfaceRepresentation(
-            mallaRemanente, "Hueso", [0.9, 0.8, 0.6]
-        )
-        if not idHueso:
-            print("CranioPlan DIAGNÓSTICO: no se pudo importar el hueso a la segmentación.")
-            slicer.mrmlScene.RemoveNode(segCorte)
-            return None
-
-        segmentEditorWidget = slicer.qMRMLSegmentEditorWidget()
-        segmentEditorWidget.setMRMLScene(slicer.mrmlScene)
-        segEditorNode = slicer.mrmlScene.AddNewNodeByClass('vtkMRMLSegmentEditorNode')
-        segmentEditorWidget.setMRMLSegmentEditorNode(segEditorNode)
-        segmentEditorWidget.setSegmentationNode(segCorte)
-        segmentEditorWidget.setSourceVolumeNode(volumeNode)
-
-        # === PASO 1 de identidad: etiquetar las piezas madre ANTES de cortar ===
-        boneArrAntes = slicer.util.arrayFromSegmentBinaryLabelmap(segCorte, idHueso, volumeNode)
-        boneMaskAntes = boneArrAntes.astype(bool)  # astype copia; no es vista viva
-        labeledAntes, nMadres = ndimage.label(boneMaskAntes)
-        print(f"CranioPlan: {nMadres} pieza(s) madre etiquetada(s) por vóxeles ANTES del corte.")
-
-        # === PASO 2: construir el anillo de corte EN VÓXELES y restarlo ===
-        # No se malla un tubo delgado (eso producía el 'twist' del lazo y
-        # huecos por aliasing que dejaban el corte incompleto). El anillo se
-        # arma barriendo la curva a lo largo de la normal del hueso y
-        # dilatándola el grosor de hoja: continuo por construcción.
-        anilloCorte = self._anilloDeCorteEnVoxeles(
-            boneMaskAntes, curvaNode, mallaRemanente, volumeNode,
-            grosorMM, margenSeguridadMM, esCerrada
-        )
-        if anilloCorte is None:
-            print("CranioPlan DIAGNÓSTICO: no se pudo construir el anillo de corte en vóxeles.")
-            segmentEditorWidget = None
-            slicer.mrmlScene.RemoveNode(segEditorNode)
-            slicer.mrmlScene.RemoveNode(segCorte)
-            return None
-
-        nVoxAnillo = int(np.count_nonzero(anilloCorte))
-        print(
-            f"CranioPlan DIAGNÓSTICO: anillo de corte = {nVoxAnillo} vóxeles de hueso a quitar "
-            f"(grosor {grosorMM:.1f} mm)."
-        )
-
-        boneCut = np.logical_and(boneMaskAntes, np.logical_not(anilloCorte)).astype(np.uint8)
-        slicer.util.updateSegmentBinaryLabelmapFromArray(
-            boneCut, segCorte, idHueso, volumeNode
-        )
-
-        # === PASO 3: descomponer el resultado del corte ===
-        # Ya no se usa el Segment Editor para separar por islas: la
-        # clasificación se hace sobre las máscaras de vóxeles (numpy), más
-        # robusto. Para curva CERRADA se parte por geometría (prisma del lazo);
-        # para ABIERTA, por identidad de piezas conexas.
-        segmentEditorWidget = None
-        slicer.mrmlScene.RemoveNode(segEditorNode)
-
-        espaciado = volumeNode.GetSpacing()
-        volumenVoxelMM3 = espaciado[0] * espaciado[1] * espaciado[2]
-        boneCutMask = boneCut.astype(bool)
-
-        flapMasks = []        # una máscara booleana por flap extraído
-        restanteMask = None
-
-        if esCerrada:
-            # ---- CLASIFICACIÓN GEOMÉTRICA POR EL PRISMA DEL LAZO ----
-            # El flap es el hueso ENCERRADO por el lazo (dentro del polígono
-            # proyectado y dentro de ±slab del plano). Partición pura por
-            # geometría: NO depende de que el anillo haya desconectado el disco
-            # por conectividad (que fallaba cerca de agujeros dejando puentes).
-            # Por eso SIEMPRE separa el flap del resto.
-            puntosLazo = curvaNode.GetCurvePointsWorld()
-            loopRAS = None
-            if puntosLazo is not None and puntosLazo.GetNumberOfPoints() >= 3:
-                loopRAS = np.array([puntosLazo.GetPoint(i)
-                                    for i in range(puntosLazo.GetNumberOfPoints())])
-
-            if loopRAS is None:
-                print("CranioPlan DIAGNÓSTICO: no pude leer los puntos del lazo; todo al restante.")
-                restanteMask = boneCutMask
-            else:
-                flapMask, restMask = self._particionPorPrismaDelLazo(
-                    boneCutMask, loopRAS, volumeNode
-                )
-                nFlap = int(np.count_nonzero(flapMask)) if flapMask is not None else 0
-                nRest = int(np.count_nonzero(restMask)) if restMask is not None else 0
-                print(
-                    "CranioPlan DIAGNÓSTICO: partición geométrica por el prisma del lazo -> "
-                    f"flap {nFlap * volumenVoxelMM3 / 1000.0:.2f} cm3 ({nFlap} vóx), "
-                    f"restante {nRest * volumenVoxelMM3 / 1000.0:.2f} cm3."
-                )
-                UMBRAL_FLAP_VOXELES = 30
-                if flapMask is not None and nFlap >= UMBRAL_FLAP_VOXELES:
-                    flapMasks.append(flapMask)
-                    restanteMask = restMask
-                else:
-                    print("CranioPlan DIAGNÓSTICO: casi no hay hueso dentro del lazo; 0 flaps.")
-                    restanteMask = boneCutMask
-        else:
-            # ---- CURVA ABIERTA: identidad por conectividad ----
-            # Una línea abierta solo separa hueso si cruza una placa de lado a
-            # lado. Se etiquetan las piezas conexas tras el corte y se comparan
-            # con las madre: si una madre se partió en >=2 piezas reales, la
-            # mayor queda en el restante y las otras son flaps.
-            labeledCut, nHijas = ndimage.label(boneCutMask)
-            restanteMask = np.zeros_like(boneCutMask)
-            UMBRAL_RUIDO_VOXELES = 30
-            porMadre = {}
-            for lab in range(1, nHijas + 1):
-                m = (labeledCut == lab)
-                vox = int(np.count_nonzero(m))
-                if vox < UMBRAL_RUIDO_VOXELES:
-                    restanteMask = np.logical_or(restanteMask, m)  # ruido -> restante
-                    continue
-                etiquetas = labeledAntes[m]
-                etiquetas = etiquetas[etiquetas > 0]
-                madre = int(np.bincount(etiquetas).argmax()) if etiquetas.size else 0
-                porMadre.setdefault(madre, []).append((vox, m))
-
-            print("CranioPlan DIAGNÓSTICO: resultado del corte por pieza madre:")
-            for madre in sorted(porMadre.keys()):
-                piezas = sorted(porMadre[madre], key=lambda x: x[0], reverse=True)
-                reales = [(v, m) for (v, m) in piezas
-                          if v * volumenVoxelMM3 >= volumenMinimoFragmentoMM3]
-                esquirlas = [(v, m) for (v, m) in piezas
-                             if v * volumenVoxelMM3 < volumenMinimoFragmentoMM3]
-                if len(reales) <= 1:
-                    for (v, m) in piezas:
-                        restanteMask = np.logical_or(restanteMask, m)
-                    detalle = ", ".join(f"{v * volumenVoxelMM3 / 1000.0:.2f}" for (v, m) in piezas)
-                    print(f"    madre {madre}: NO separada ({len(reales)} real; {detalle} cm3) -> restante.")
-                else:
-                    restanteMask = np.logical_or(restanteMask, reales[0][1])
-                    for (v, m) in reales[1:]:
-                        flapMasks.append(m)
-                    for (v, m) in esquirlas:
-                        restanteMask = np.logical_or(restanteMask, m)
-                    vols = ", ".join(f"{v * volumenVoxelMM3 / 1000.0:.2f}" for (v, m) in reales)
-                    print(
-                        f"    madre {madre}: SEPARADA en {len(reales)} reales ({vols} cm3). "
-                        f"Mayor al restante; {len(reales) - 1} extraída(s)."
-                    )
-
-        # === PASO 4: exportar cada máscara (restante y flaps) a un modelo ===
-        def _mascaraAModelo(mascara, nombre, color):
-            if mascara is None or not mascara.any():
-                return None
-            segTmp = slicer.mrmlScene.AddNewNodeByClass(
-                'vtkMRMLSegmentationNode', 'CranioPlan_tmp_export'
-            )
-            segTmp.CreateDefaultDisplayNodes()
-            segTmp.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
-            sid = segTmp.GetSegmentation().AddEmptySegment("m")
-            slicer.util.updateSegmentBinaryLabelmapFromArray(
-                mascara.astype(np.uint8), segTmp, sid, volumeNode
-            )
-            segTmp.CreateClosedSurfaceRepresentation()
-            pd = vtk.vtkPolyData()
-            segTmp.GetClosedSurfaceRepresentation(sid, pd)
-            ok = pd.GetNumberOfPoints() > 0
-            pdcopy = vtk.vtkPolyData()
-            if ok:
-                pdcopy.DeepCopy(pd)
-            slicer.mrmlScene.RemoveNode(segTmp)
-            if not ok:
-                return None
-            pdcopy = self._decimarMalla(pdcopy, reduccionMallaFragmentos)
-            return self.crearModeloDesdePolyData(pdcopy, nombre, color)
-
-        slicer.mrmlScene.RemoveNode(segCorte)
-
-        restanteModel = _mascaraAModelo(restanteMask, "Craneo_restante", (0.9, 0.8, 0.6))
-        if restanteModel is None:
-            print("CranioPlan DIAGNÓSTICO: el cráneo restante quedó vacío tras el corte.")
-            return None
-
-        COLORES_EXTRAIDOS = [
-            (0.55, 0.75, 0.85),  # celeste
-            (0.75, 0.85, 0.55),  # verde claro
-            (0.85, 0.55, 0.75),  # rosado
-            (0.95, 0.75, 0.45),  # naranja suave
-        ]
-        fragmentosExtraidos = []
-        for k, fmask in enumerate(flapMasks):
-            indice = indiceInicialFragmento + k
-            nombre = f"Fragmento_extraido_{indice}"
-            color = COLORES_EXTRAIDOS[(indice - 1) % len(COLORES_EXTRAIDOS)]
-            modelo = _mascaraAModelo(fmask, nombre, color)
-            if modelo is not None:
-                fragmentosExtraidos.append(modelo)
-                print(f"CranioPlan: {modelo.GetName()} creado.")
-
-        print(
-            f"CranioPlan: corte terminado. {len(fragmentosExtraidos)} fragmento(s) "
-            "extraído(s) por este corte."
-        )
-        print("=" * 60)
-
-        return {
-            "restante": restanteModel,
-            "fragmentos": fragmentosExtraidos,
-            "piezasCreadas": len(fragmentosExtraidos),
-            "piezasAntes": nMadres,
-        }
-
-
-#
-# CranioPlanTest
-#
-
-
+        nombre = slicer.mrmlScene.GenerateUniqueName(
+            "%s%d" % (Comun.PREFIJO_CURVA_CORTE, indice))
+        curva = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLMarkupsCurveNode", nombre)
+        curva.CreateDefaultDisplayNodes()
+        d = curva.GetDisplayNode()
+        if d is not None:
+            d.SetSelectedColor(1.0, 0.2, 0.2)
+            d.SetColor(1.0, 0.4, 0.4)
+            d.SetGlyphScale(2.5)
+            d.SetLineThickness(0.5)
+            d.SetPropertiesLabelVisibility(False)
+            d.SetPointLabelsVisibility(False)
+        return curva
+
+    def previsualizarCortes(self, grosorMM):
+        BloqueF.configurar(GROSOR_CORTE_MM=float(grosorMM))
+        return BloqueF.diagnosticar()
+
+    def ocultarPrevisualizacion(self):
+        BloqueF.ocultarPicos(False)
+
+    def cortar(self, grosorMM):
+        BloqueF.configurar(GROSOR_CORTE_MM=float(grosorMM))
+        return BloqueF.cortar()
+
+    # -------- Paso 4 --------
+    def prepararPiezas(self):
+        return self.bloqueG.preparar()
+
+
+# ============================================================
+# TEST
+# ============================================================
 class CranioPlanTest(ScriptedLoadableModuleTest):
 
     def setUp(self):
