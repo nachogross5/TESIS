@@ -2,6 +2,66 @@
 CRANIOPLAN - CHANGELOG
 ============================================================
 
+2026-09-25 - Version del modulo en la consola
+------------------------------------------------------------
+CRANIOPLAN_VERSION pasa a "2026-09-25 - Bloque A v7.2 + Corte v17 +
+Bloque G v1" (es lo que se imprime al cargar o recargar el modulo).
+Prueba end-to-end de v17 hecha por Valentino en Slicer: previsualizacion,
+corte y separacion de piezas correctos.
+
+2026-09-24 - Paso 3: trazado de corte con aspecto de Markups por defecto
+------------------------------------------------------------
+En el modulo la linea de corte se veia como un tubo rojo grueso con puntos
+grandes (en la consola se ve fina). La causa era CranioPlan.py:
+nuevaCurvaDeCorte forzaba SetGlyphScale(2.5) y SetLineThickness(0.5), y
+onVerLinea engrosaba la linea elegida (1.0). Nada que ver con el ancho de
+sierra ni con el Bloque F. Ahora la curva usa los valores por defecto de
+Slicer y "Ver" resalta la linea solo con color (amarillo); las demas
+vuelven al rojo.
+
+2026-09-24 - Bloque F v16 -> v17 (integra desarrollo/nacho/corte_V17.py)
+------------------------------------------------------------
+CranioPlanLib/BloqueF.py pasa a v17. El algoritmo es el del script de
+consola de Nacho (las funciones nuevas o cambiadas se copiaron textuales y
+se verifico con ast que son identicas); solo cambia el envoltorio del
+modulo (_p() en vez de print, dicts de retorno, configurar()).
+corte_V17.py no se modifico.
+
+  - [C1] Vuelve la busqueda del camino mas corto, pero para la curva
+    entera: Viterbi sobre 25 angulos en +-45 grados (plano perpendicular a
+    la curva) con giro maximo de 4 grados entre puntos vecinos. Evita por
+    construccion los "tajos random" de v14/v15. Se puede apagar con
+    configurar(BUSCAR_CAMINO_MAS_CORTO=False).
+  - [C2] Uniones que cierran: la punta que queda a menos de
+    UNION_TOLERANCIA_MM (4 -> 6mm) de otra curva se extiende hasta tocarla
+    + SOLAPE_UNION_MM (1mm). v16 no la extendia y dejaba huecos de 0.5-4mm.
+  - [C3] Se reporta el tramo continuo mas largo sin atravesar (mm).
+  - Los picos de la previsualizacion se recortan al mismo tope que usa
+    cortar().
+  - Constantes nuevas: BUSCAR_CAMINO_MAS_CORTO, ANGULO_BUSQUEDA_MAX,
+    N_ANGULOS_BUSQUEDA, MAX_GIRO_POR_PASO_DEG, PESO_REGULARIZACION,
+    PESO_SUAVIDAD, ESPESOR_MIN_VALIDO, PENAL_SIN_SALIDA_MM,
+    PASO_BUSQUEDA_VOXELES, BLOQUE_BUSQUEDA, SOLAPE_UNION_MM.
+  - diagnosticar() y cortar() devuelven, ademas de las claves de antes,
+    tiradaPuntos, tiradaMM, busqueda, inclinacionMediana, inclinacionMax,
+    giroMaxPorPaso y huecosUnion por curva.
+  - El reporte de puntas (repetido en el script) queda en
+    _reportar_puntas().
+
+CranioPlan.py (solo textos del Paso 3, ningun parametro nuevo): el resumen
+de la previsualizacion muestra el tramo mas largo sin cortar y los huecos
+en uniones; se corrigio el texto de los puntos rojos (ya no es "la
+perpendicular"); tras cortar se recuerda que una linea abierta sola no
+separa.
+
+Casos de falla identificados por revision de codigo (no observados todavia
+en casos reales), documentados en el encabezado de BloqueF.py: salto de
+direccion en la costura de lazos cerrados (reproducido con costos
+sinteticos: 18.75 grados; la interfaz solo ofrece lineas abiertas),
+extension de union por la tangente que puede no tocar la otra curva,
+uniones no deseadas entre curvas a menos de 6mm, previsualizacion mas
+lenta.
+
 2026-09-24 - Reorganizacion del repositorio
 ------------------------------------------------------------
 El repo tenia 25 scripts de consola sueltos en la raiz mezclados con el
@@ -36,10 +96,8 @@ hacer en Slicer (Edit > Application Settings > Modules > Additional module
 paths debe apuntar a la subcarpeta CranioPlan/, no a la raiz del repo).
 
 PENDIENTES (no se integran en este cambio, quedan para un PR aparte):
-  - Portar a CranioPlanLib/BloqueF.py las mejoras de
-    desarrollo/nacho/corte_V17.py: correccion del bug de extension de
-    puntas en uniones (huecos de 2-4mm en la v16 actual del modulo) y la
-    busqueda de camino mas corto por Viterbi.
+  - (HECHO, ver entrada "Bloque F v16 -> v17") Portar a
+    CranioPlanLib/BloqueF.py las mejoras de desarrollo/nacho/corte_V17.py.
   - Portar a CranioPlanLib/BloqueG.py las mejoras de
     desarrollo/valentino/Bloque_G_V1.1.py: movilidad de piezas por
     distancia geometrica a las curvas de corte, indice craneal acotado a

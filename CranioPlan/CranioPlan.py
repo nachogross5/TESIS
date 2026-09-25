@@ -24,7 +24,7 @@
 #   CranioPlanLib/Comun.py   - nombres de nodos compartidos
 #   CranioPlanLib/BloqueC.py - elegir y cargar la serie DICOM correcta
 #   CranioPlanLib/BloqueA.py - preparar el craneo (v7.2)
-#   CranioPlanLib/BloqueF.py - cortar (v16)
+#   CranioPlanLib/BloqueF.py - cortar (v17)
 #   CranioPlanLib/BloqueG.py - reacomodar las piezas (v1)
 #
 # EL FLUJO, DE PUNTA A PUNTA
@@ -66,7 +66,9 @@ from CranioPlanLib import Comun                        # noqa: E402
 from CranioPlanLib import BloqueC, BloqueA, BloqueF, BloqueG   # noqa: E402
 
 
-CRANIOPLAN_VERSION = "2026-08-21 - Bloque A v7.2 + Corte v16 + Bloque G v1"
+# Se imprime en la consola al cargar o recargar el modulo. Actualizar la fecha
+# y la version de cada bloque cada vez que se integra una version nueva.
+CRANIOPLAN_VERSION = "2026-09-25 - Bloque A v7.2 + Corte v17 + Bloque G v1"
 
 # --- Colores de los carteles de estado ---
 GRIS    = "color: #777777;"
@@ -858,14 +860,13 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             d = c.GetDisplayNode()
             if d is None:
                 continue
+            # se resalta solo con color: el grosor queda el de Slicer
             if c is curva:
                 d.SetSelectedColor(1.0, 1.0, 0.0)
                 d.SetColor(1.0, 1.0, 0.0)
-                d.SetLineThickness(1.0)
             else:
                 d.SetSelectedColor(1.0, 0.2, 0.2)
                 d.SetColor(1.0, 0.4, 0.4)
-                d.SetLineThickness(0.5)
 
     def onBorrarLinea(self, curva):
         nombre = curva.GetName()
@@ -914,11 +915,23 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                           % (c["nombre"], pct, c["espesorMediano"]))
             if c["nNoAtraviesa"]:
                 problemas = True
-                lineas.append("     %d punto(s) en rojo: ahi la perpendicular al "
-                              "hueso corre a lo largo de la placa (tipico detras "
-                              "de los ojos). Si ese tramo tiene que separarse, "
-                              "trazá una linea extra sobre la cara por la que si "
-                              "se puede entrar." % c["nNoAtraviesa"])
+                lineas.append("     %d punto(s) en rojo: en esos puntos ninguna "
+                              "inclinacion de la sierra logra atravesar el hueso "
+                              "(tipico detras de los ojos). Si ese tramo tiene que "
+                              "separarse, trazá una linea extra sobre la cara por "
+                              "la que si se puede entrar." % c["nNoAtraviesa"])
+            if c.get("tiradaMM", 0.0) > 0:
+                lineas.append("     Tramo continuo mas largo sin cortar: %.1f mm. "
+                              "Este es el numero que importa: un solo tramo sin "
+                              "cortar mantiene la pieza unida, aunque el resto "
+                              "este cortado." % c["tiradaMM"])
+            for h in c.get("huecosUnion", []):
+                problemas = True
+                lineas.append("     La punta del %s queda a %.1f mm de otra linea "
+                              "y no llega a tocarla: queda un puente de hueso de "
+                              "%.1f mm. Si esas dos lineas tienen que unirse, "
+                              "acercá las puntas."
+                              % (h["punta"], h["distancia"], h["hueco"]))
         self._poner(self.estadoCorte, "\n".join(lineas),
                     AMBAR if problemas else VERDE)
         self.botonOcultarPrevia.setVisible(True)
@@ -959,6 +972,10 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                           "previsualizacion y agregá una linea por la otra cara."
                           % (len(resultado["noSepararon"]),
                              ", ".join(resultado["noSepararon"])))
+            lineas.append("Recordá: una linea abierta sola nunca separa una "
+                          "pieza del craneo. Para separarla, las lineas tienen "
+                          "que cerrar una vuelta completa, unidas en los dos "
+                          "extremos.")
         self._poner(self.estadoCorte, "\n".join(lineas),
                     AMBAR if resultado["noSepararon"] else VERDE)
 
@@ -1550,10 +1567,11 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
         curva.CreateDefaultDisplayNodes()
         d = curva.GetDisplayNode()
         if d is not None:
+            # Tamano de puntos y grosor de linea: los de Slicer por defecto
+            # (no se tocan), igual que al trazar desde la consola. Antes se
+            # forzaban mas grandes y la linea se veia como un tubo grueso.
             d.SetSelectedColor(1.0, 0.2, 0.2)
             d.SetColor(1.0, 0.4, 0.4)
-            d.SetGlyphScale(2.5)
-            d.SetLineThickness(0.5)
             d.SetPropertiesLabelVisibility(False)
             d.SetPointLabelsVisibility(False)
         return curva
