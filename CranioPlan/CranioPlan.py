@@ -64,6 +64,7 @@ if _CARPETA_MODULO not in sys.path:
 import CranioPlanLib                                   # noqa: E402
 from CranioPlanLib import Comun                        # noqa: E402
 from CranioPlanLib import BloqueC, BloqueA, BloqueF, BloqueG   # noqa: E402
+from CranioPlanLib import PuenteFG                          # noqa: E402
 
 
 # Se imprime en la consola al cargar o recargar el modulo. Actualizar la fecha
@@ -967,17 +968,30 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                              "" if p["watertight"] else "   (malla abierta)"))
         if resultado["noSepararon"]:
             lineas.append("")
-            lineas.append("ATENCION: %d corte(s) quedaron marcados pero NO "
-                          "separaron el hueso: %s. Mirá los puntos rojos de la "
-                          "previsualizacion y agregá una linea por la otra cara."
+            lineas.append("ATENCION: %d linea(s) quedaron marcadas pero NO "
+                          "separaron el hueso: %s. La pieza que tenia que "
+                          "salir sigue pegada al resto del craneo, asi que en "
+                          "el Paso 4 no se va a poder mover sola. Mirá los "
+                          "puntos rojos de la previsualizacion, corregí esa "
+                          "linea y volvé a cortar."
                           % (len(resultado["noSepararon"]),
                              ", ".join(resultado["noSepararon"])))
             lineas.append("Recordá: una linea abierta sola nunca separa una "
                           "pieza del craneo. Para separarla, las lineas tienen "
                           "que cerrar una vuelta completa, unidas en los dos "
                           "extremos.")
+        puente = resultado.get("puente")
+        if puente and puente["desconocidas"]:
+            lineas.append("")
+            lineas.append("AVISO: %d pieza(s) quedaron sin clasificar: %s. En "
+                          "el Paso 4 se decide si se mueven segun lo cerca que "
+                          "esten de una linea de corte."
+                          % (len(puente["desconocidas"]),
+                             ", ".join(puente["desconocidas"])))
+        hayAvisos = bool(resultado["noSepararon"]) or bool(
+            puente and puente["desconocidas"])
         self._poner(self.estadoCorte, "\n".join(lineas),
-                    AMBAR if resultado["noSepararon"] else VERDE)
+                    AMBAR if hayAvisos else VERDE)
 
         self._habilitar(self.paso4, True)
         self._habilitar(self.paso5, True)
@@ -1493,6 +1507,7 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
         # pegable en la consola tal cual). Se le enchufa el mismo log y el
         # prefijo de curvas para que no agarre curvas viejas de la escena.
         BloqueF.configurar(log=self.log, PREFIJO_CURVAS=Comun.PREFIJO_CURVA_CORTE)
+        PuenteFG.configurar(log=self.log)
 
     def getParameterNode(self):
         return CranioPlanParameterNode(super().getParameterNode())
@@ -1585,7 +1600,13 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
 
     def cortar(self, grosorMM):
         BloqueF.configurar(GROSOR_CORTE_MM=float(grosorMM))
-        return BloqueF.cortar()
+        resultado = BloqueF.cortar()
+        if resultado is not None:
+            # Puente F -> G: deja los nombres Tapa_/Resto_/Hueso_ y los
+            # atributos CranioPlan.* en cada pieza, sin que el medico apriete
+            # nada. Con el Bloque F arreglado solo escribe los atributos.
+            resultado["puente"] = PuenteFG.puente()
+        return resultado
 
     # -------- Paso 4 --------
     def prepararPiezas(self):

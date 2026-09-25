@@ -17,6 +17,7 @@ set(MODULE_PYTHON_SCRIPTS
   CranioPlanLib/BloqueA.py
   CranioPlanLib/BloqueF.py
   CranioPlanLib/BloqueG.py
+  CranioPlanLib/PuenteFG.py
   )
 
 set(MODULE_PYTHON_RESOURCES

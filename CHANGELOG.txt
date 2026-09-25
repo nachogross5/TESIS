@@ -2,6 +2,21 @@
 CRANIOPLAN - CHANGELOG
 ============================================================
 
+2026-09-25 - Puente F -> G como archivo propio (CranioPlanLib/PuenteFG.py)
+------------------------------------------------------------
+Se integra desarrollo/valentino/PuenteF_G.py como CranioPlanLib/PuenteFG.py
+con la logica identica (verificado con ast; solo cambia el envoltorio:
+_p() en vez de print, puente() devuelve un dict, nombres desde Comun.py).
+Agregado a CMakeLists.txt y a recargar().
+La Logic lo llama automaticamente despues de cortar(), sin boton. Con el
+arreglo de AddEmptySegment reporta "Los nombres ya estan bien" y solo
+escribe los atributos CranioPlan.origen / tipo / curva.
+Paso 3: el aviso de lineas que no separaron ahora explica la consecuencia
+(la pieza sigue pegada y en el Paso 4 no se puede mover sola) y se avisa si
+el puente dejo piezas sin clasificar.
+Limite conocido (no se arregla ahora): si un corte grabo pero no separo, la
+pieza sale como Hueso_ (preexistente) aunque el corte la haya tocado.
+
 2026-09-25 - Bloque F v17: arreglo del contrato F -> G (AddEmptySegment)
 ------------------------------------------------------------
 En cortar(), AddEmptySegment(nombre) pasaba el nombre como ID del segmento:
