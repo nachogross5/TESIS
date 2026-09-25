@@ -2,6 +2,17 @@
 CRANIOPLAN - CHANGELOG
 ============================================================
 
+2026-09-25 - Paso 4: botones "Dejar fija" / "Liberar" y separacion entre piezas
+------------------------------------------------------------
+Expone en la interfaz lo que el Bloque G v1.1 ya tenia:
+  - Por fila, "Dejar fija" (fijar_pieza) o "Liberar" (liberar_pieza), para
+    corregir el criterio automatico: una mandibula, vertebra o tubo que paso
+    cerca de una linea queda movible; una pieza que ninguna linea toco queda
+    fija. Dejar fija una pieza movida la devuelve a su lugar original.
+  - "Ver separacion entre piezas" (huecos()): mm de cada pieza a la vecina
+    mas cercana. Informa el tiempo que tardo (en el panel y en el Detalle
+    tecnico), porque hoy recorre puntos con bucles Python.
+
 2026-09-25 - Bloque G v1 -> v1.1 (integra desarrollo/valentino/Bloque_G_V1.1.py)
 ------------------------------------------------------------
 CranioPlanLib/BloqueG.py pasa a v1.1 con la logica del script (verificado

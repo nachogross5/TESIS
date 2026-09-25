@@ -43,6 +43,7 @@
 
 import os
 import sys
+import time
 
 import qt
 import ctk
@@ -1124,6 +1125,12 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "Crea tres puntos (nasion, bregma, inion) para comprobar que la "
             "cabeza no este torcida en la tomografia, que sesgaria las medidas.")
         filaMedidas.addWidget(self.botonLandmarks)
+        self.botonHuecos = qt.QPushButton("Ver separacion entre piezas")
+        self.botonHuecos.toolTip = (
+            "Para cada pieza, cuantos milimetros la separan de la pieza mas "
+            "cercana. Sirve para decidir donde hace falta injerto o placa. "
+            "0 mm = se tocan o se superponen.")
+        filaMedidas.addWidget(self.botonHuecos)
         self.botonResetear = qt.QPushButton("Devolver todo a su lugar")
         filaMedidas.addWidget(self.botonResetear)
         caja.addLayout(filaMedidas)
@@ -1138,6 +1145,7 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.botonMedidas.connect("clicked(bool)", self.onVerMedidas)
         self.botonLandmarks.connect("clicked(bool)", self.onMarcarLineaMedia)
         self.botonResetear.connect("clicked(bool)", self.onResetearPiezas)
+        self.botonHuecos.connect("clicked(bool)", self.onVerHuecos)
 
     def onPrepararPiezas(self):
         self._esperando(self.estadoPiezas, "Preparando las piezas...")
@@ -1189,6 +1197,22 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             botonMover.setEnabled(f["movible"])
             cajaFila.addWidget(botonMover)
 
+            # Corrige el criterio automatico: una pieza que no toco ningun
+            # corte queda fija, y una que paso cerca de una linea queda movible.
+            if f["preexistente"]:
+                botonFija = qt.QPushButton("Liberar")
+                botonFija.toolTip = ("Esta pieza quedo fija porque ninguna "
+                                     "linea de corte pasa cerca. Liberala "
+                                     "si hay que moverla.")
+            else:
+                botonFija = qt.QPushButton("Dejar fija")
+                botonFija.toolTip = ("Para piezas que no se tienen que mover "
+                                     "(mandibula, vertebras, tubos) y quedaron "
+                                     "movibles por estar cerca de una linea.")
+            botonFija.setFixedWidth(80)
+            botonFija.setEnabled(not f["esAncla"] and f["activa"])
+            cajaFila.addWidget(botonFija)
+
             botonBase = qt.QPushButton("Es la base")
             botonBase.setFixedWidth(80)
             botonBase.setEnabled(not f["esAncla"] and f["activa"])
@@ -1211,6 +1235,10 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                                lambda _c, n=nombre: self.onSeleccionarPieza(n))
             botonBase.connect("clicked(bool)",
                               lambda _c, n=nombre: self.onFijarBase(n))
+            preexistente = f["preexistente"]
+            botonFija.connect(
+                "clicked(bool)",
+                lambda _c, n=nombre, pre=preexistente: self.onFijarOLiberar(n, pre))
             activa = f["activa"]
             botonQuitar.connect(
                 "clicked(bool)",
@@ -1234,6 +1262,20 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._refrescarFragmentos()
         self._poner(self.estadoPiezas,
                     "'%s' quedo como base fija del armado." % nombre, AZUL)
+
+    def onFijarOLiberar(self, nombre, estabaFija):
+        if estabaFija:
+            self.logic.bloqueG.liberar_pieza(nombre)
+            texto = "'%s' ahora se puede mover." % nombre
+        else:
+            self.logic.bloqueG.fijar_pieza(nombre)
+            texto = ("'%s' queda fija y no se cuenta en las medidas."
+                     % nombre)
+            if self._piezaSeleccionada == nombre:
+                self._piezaSeleccionada = None
+                self.panelMovimiento.setVisible(False)
+        self._refrescarFragmentos()
+        self._poner(self.estadoPiezas, texto, AZUL)
 
     def onSacarODevolver(self, nombre, estabaActiva):
         if estabaActiva:
@@ -1345,6 +1387,30 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     "el craneo desde el modulo Markups (nasion en la raiz de la "
                     "nariz, bregma arriba, inion atras) y despues volvé a "
                     "'Ver las medidas'.", AZUL)
+
+    def onVerHuecos(self):
+        self._esperando(self.estadoMedidas,
+                        "Midiendo la separacion entre piezas...")
+        inicio = time.time()
+        try:
+            filas = self.logic.bloqueG.huecos()
+        finally:
+            self._listo()
+        segundos = time.time() - inicio
+        self.logic.log("Separacion entre piezas calculada en %.1f s." % segundos)
+        if not filas:
+            self._poner(self.estadoMedidas,
+                        "Hacen falta al menos dos piezas en el armado.", ROJO)
+            return
+        lineas = ["Separacion de cada pieza con la mas cercana:"]
+        for h in filas:
+            nombre = h["pieza"] + (" (%s)" % h["etiqueta"] if h["etiqueta"] else "")
+            lineas.append("   %-24s -> %-22s %5.1f mm"
+                          % (nombre, h["vecina"] or "-", h["mm"]))
+        lineas.append("0 mm = las piezas se tocan o se superponen (el modulo "
+                      "no detecta superposiciones). Es una medida aproximada.")
+        lineas.append("(calculado en %.1f s)" % segundos)
+        self._poner(self.estadoMedidas, "\n".join(lineas), AZUL)
 
     def onResetearPiezas(self):
         n = self.logic.bloqueG.resetear()
