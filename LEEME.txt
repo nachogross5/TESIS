@@ -111,7 +111,10 @@ de la mas frecuente a la menos:
 Truco para saber si Slicer lo esta leyendo: al cargarse imprime en la consola
 de Python
 
-    CranioPlan 2026-08-21 - ...: modulo cargado.
+    CranioPlan <fecha> - Bloque A vX + Corte vX + Bloque G vX: modulo cargado.
+
+(la fecha y las versiones cambian con cada integracion; estan en
+CRANIOPLAN_VERSION, al principio de CranioPlan/CranioPlan.py).
 
 Si eso no aparece, el problema es de instalacion (a-e), no del codigo.
 

@@ -2,6 +2,13 @@
 CRANIOPLAN - CHANGELOG
 ============================================================
 
+2026-09-25 - Version del modulo en la consola
+------------------------------------------------------------
+CRANIOPLAN_VERSION pasa a "2026-09-25 - Bloque A v7.2 + Corte v17 +
+Bloque G v1" (es lo que se imprime al cargar o recargar el modulo).
+Prueba end-to-end de v17 hecha por Valentino en Slicer: previsualizacion,
+corte y separacion de piezas correctos.
+
 2026-09-24 - Paso 3: trazado de corte con aspecto de Markups por defecto
 ------------------------------------------------------------
 En el modulo la linea de corte se veia como un tubo rojo grueso con puntos

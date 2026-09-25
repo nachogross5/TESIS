@@ -66,7 +66,9 @@ from CranioPlanLib import Comun                        # noqa: E402
 from CranioPlanLib import BloqueC, BloqueA, BloqueF, BloqueG   # noqa: E402
 
 
-CRANIOPLAN_VERSION = "2026-08-21 - Bloque A v7.2 + Corte v16 + Bloque G v1"
+# Se imprime en la consola al cargar o recargar el modulo. Actualizar la fecha
+# y la version de cada bloque cada vez que se integra una version nueva.
+CRANIOPLAN_VERSION = "2026-09-25 - Bloque A v7.2 + Corte v17 + Bloque G v1"
 
 # --- Colores de los carteles de estado ---
 GRIS    = "color: #777777;"
