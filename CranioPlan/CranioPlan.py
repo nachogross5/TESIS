@@ -25,7 +25,8 @@
 #   CranioPlanLib/BloqueC.py - elegir y cargar la serie DICOM correcta
 #   CranioPlanLib/BloqueA.py - preparar el craneo (v7.2)
 #   CranioPlanLib/BloqueF.py - cortar (v17)
-#   CranioPlanLib/BloqueG.py - reacomodar las piezas (v1)
+#   CranioPlanLib/BloqueG.py - reacomodar las piezas (v1.1)
+#   CranioPlanLib/PuenteFG.py - nombres y atributos de las piezas (F -> G)
 #
 # EL FLUJO, DE PUNTA A PUNTA
 # --------------------------
@@ -69,7 +70,7 @@ from CranioPlanLib import PuenteFG                          # noqa: E402
 
 # Se imprime en la consola al cargar o recargar el modulo. Actualizar la fecha
 # y la version de cada bloque cada vez que se integra una version nueva.
-CRANIOPLAN_VERSION = "2026-09-25 - Bloque A v7.2 + Corte v17 + Bloque G v1"
+CRANIOPLAN_VERSION = "2026-09-25 - Bloque A v7.2 + Corte v17 + Bloque G v1.1"
 
 # --- Colores de los carteles de estado ---
 GRIS    = "color: #777777;"
@@ -1295,11 +1296,11 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     "Craneo actual: %.0f mm de largo por %.0f mm de ancho "
                     "(indice cefalico %.1f).\n"
                     "Objetivo: %.0f x %.0f mm (indice %.1f).\n"
-                    "Hay que acortar %.0f mm de adelante hacia atras y ensanchar "
-                    "%.0f mm a lo ancho."
+                    "Moviendo las piezas se puede acortar de adelante hacia "
+                    "atras; el ancho no se gana moviendo placas enteras."
                     % (info["largoActual"], info["anchoActual"], info["icActual"],
                        info["largoObjetivo"], info["anchoObjetivo"],
-                       info["icObjetivo"], info["acortar"], info["ensanchar"]),
+                       info["icObjetivo"]),
                     AZUL)
 
     def onVerMedidas(self):
@@ -1324,10 +1325,18 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if m["descartadas"]:
             lineas.append("Hueso resecado: %.1f cm3 en %d pieza(s)."
                           % (m["volumenDescartado"], len(m["descartadas"])))
+        if m["nivelS"] is None:
+            lineas.append("ATENCION: el indice se midio sobre todo el craneo, "
+                          "incluida la base y la cara, asi que puede no ser "
+                          "exacto (suele salir mas bajo que el real).")
+        if m["excluidas"]:
+            lineas.append("No se cuentan en las medidas (no las toco ningun "
+                          "corte): %s." % ", ".join(m["excluidas"]))
         if m["avisoInclinacion"]:
             lineas.append("ATENCION: " + m["avisoInclinacion"])
         self._poner(self.estadoMedidas, "\n".join(lineas),
-                    AMBAR if m["avisoInclinacion"] else AZUL)
+                    AMBAR if (m["avisoInclinacion"] or m["nivelS"] is None)
+                    else AZUL)
 
     def onMarcarLineaMedia(self):
         self.logic.bloqueG.landmarks()
