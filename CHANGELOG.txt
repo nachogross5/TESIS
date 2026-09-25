@@ -2,6 +2,18 @@
 CRANIOPLAN - CHANGELOG
 ============================================================
 
+2026-09-25 - Bloque F v17: arreglo del contrato F -> G (AddEmptySegment)
+------------------------------------------------------------
+En cortar(), AddEmptySegment(nombre) pasaba el nombre como ID del segmento:
+el nombre quedaba vacio, Slicer autogeneraba "Segment_N" y los modelos
+exportados perdian los prefijos Tapa_/Resto_/Fragmento_/Hueso_ que usa el
+Bloque G (y el control de calidad de cortar(), que busca los modelos por
+nombre). Ahora es AddEmptySegment(nombre, nombre).
+Es la UNICA diferencia algoritmica de CranioPlanLib/BloqueF.py respecto de
+desarrollo/nacho/corte_V17.py (documentada en el encabezado).
+PENDIENTE: que Nacho aplique el mismo arreglo en corte_V17.py (no se
+modifico desde aca).
+
 2026-09-25 - Version del modulo en la consola
 ------------------------------------------------------------
 CRANIOPLAN_VERSION pasa a "2026-09-25 - Bloque A v7.2 + Corte v17 +

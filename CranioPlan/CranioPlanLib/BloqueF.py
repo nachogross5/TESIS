@@ -4,8 +4,9 @@
 #              CORTE / OSTEOTOMIAS
 # ============================================================
 # Es el script desarrollo/nacho/corte_V17.py convertido en libreria. El
-# algoritmo NO se toco: mismas funciones, mismos umbrales, mismo pipeline. Los
-# unicos cambios son de envoltorio:
+# algoritmo NO se toco: mismas funciones, mismos umbrales, mismo pipeline, con
+# UNA sola excepcion (ver "UNICA DIFERENCIA CON corte_V17.py" abajo). Los
+# demas cambios son de envoltorio:
 #
 #   - print() -> _p(), que escribe en la consola de Python Y en la interfaz;
 #   - diagnosticar() y cortar() ademas de imprimir DEVUELVEN un diccionario
@@ -15,6 +16,18 @@
 #     es como el modulo aplica el grosor de sierra que elige el cirujano;
 #   - el reporte de las puntas, que en el script esta repetido en
 #     diagnosticar() y en el reporte de cortar(), esta en _reportar_puntas().
+#
+# ############################################################
+# UNICA DIFERENCIA CON corte_V17.py: AddEmptySegment(nombre, nombre)
+# ############################################################
+# En cortar(), corte_V17.py hace AddEmptySegment(nombre). La firma de
+# vtkSegmentation es AddEmptySegment(segmentId, segmentName, color): con un
+# solo argumento el nombre de la pieza queda como ID y el NOMBRE queda vacio,
+# Slicer autogenera "Segment_N", y ExportSegmentsToModels bautiza los modelos
+# con ese nombre. Las piezas perdian los prefijos Tapa_/Resto_/Fragmento_/
+# Hueso_ que usan el Bloque G y el control de calidad de cortar() (que busca
+# los modelos por nombre). Aca se pasa el nombre dos veces.
+# PENDIENTE: que Nacho aplique el mismo arreglo en corte_V17.py.
 #
 # ############################################################
 # v17: VUELVE LA BUSQUEDA DEL CAMINO MAS CORTO, PERO COHERENTE
@@ -1831,7 +1844,7 @@ def cortar():
     idsPorNombre, curvaPorNombre = {}, {}
     for mask, nombre, esTapa, curva, v in piezasFinales:
         arr, nRell = _rellenar_cavidades(mask.copy(), voxel_mm3, MAX_CAVIDAD_MM3)
-        sid = segTrabajo.GetSegmentation().AddEmptySegment(nombre)
+        sid = segTrabajo.GetSegmentation().AddEmptySegment(nombre, nombre)
         slicer.util.updateSegmentBinaryLabelmapFromArray(
             arr.astype(np.uint8), segTrabajo, sid, volumeNode)
         idsPorNombre[nombre] = sid
