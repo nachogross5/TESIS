@@ -12,6 +12,7 @@
 #   BloqueA.py - preparacion del craneo (segmentacion + revision de piezas)
 #   BloqueF.py - corte / osteotomias
 #   BloqueG.py - reacomodamiento de las piezas post-corte
+#   PuenteFG.py - nombres y atributos de las piezas entre el F y el G
 #
 # Los bloques se comunican por NOMBRE DE NODO en la escena de Slicer, no por
 # variables de Python. Esa es la razon por la que cada uno sigue funcionando
@@ -23,11 +24,12 @@ from . import BloqueC        # noqa: F401
 from . import BloqueA        # noqa: F401
 from . import BloqueF        # noqa: F401
 from . import BloqueG        # noqa: F401
+from . import PuenteFG       # noqa: F401
 
 
 def recargar():
     """
-    Vuelve a leer los cinco archivos desde el disco.
+    Vuelve a leer los seis archivos desde el disco.
 
     Sirve durante el desarrollo: Slicer cachea los modulos Python importados,
     asi que despues de editar BloqueF.py el boton 'Reload' del modulo recarga
@@ -35,5 +37,5 @@ def recargar():
     darse cuenta. El widget llama a esto en cada Reload.
     """
     import importlib
-    for modulo in (Comun, BloqueC, BloqueA, BloqueF, BloqueG):
+    for modulo in (Comun, BloqueC, BloqueA, BloqueF, BloqueG, PuenteFG):
         importlib.reload(modulo)

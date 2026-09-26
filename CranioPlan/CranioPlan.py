@@ -25,7 +25,8 @@
 #   CranioPlanLib/BloqueC.py - elegir y cargar la serie DICOM correcta
 #   CranioPlanLib/BloqueA.py - preparar el craneo (v7.2)
 #   CranioPlanLib/BloqueF.py - cortar (v17)
-#   CranioPlanLib/BloqueG.py - reacomodar las piezas (v1)
+#   CranioPlanLib/BloqueG.py - reacomodar las piezas (v1.1)
+#   CranioPlanLib/PuenteFG.py - nombres y atributos de las piezas (F -> G)
 #
 # EL FLUJO, DE PUNTA A PUNTA
 # --------------------------
@@ -42,6 +43,7 @@
 
 import os
 import sys
+import time
 
 import qt
 import ctk
@@ -64,11 +66,12 @@ if _CARPETA_MODULO not in sys.path:
 import CranioPlanLib                                   # noqa: E402
 from CranioPlanLib import Comun                        # noqa: E402
 from CranioPlanLib import BloqueC, BloqueA, BloqueF, BloqueG   # noqa: E402
+from CranioPlanLib import PuenteFG                          # noqa: E402
 
 
 # Se imprime en la consola al cargar o recargar el modulo. Actualizar la fecha
 # y la version de cada bloque cada vez que se integra una version nueva.
-CRANIOPLAN_VERSION = "2026-09-25 - Bloque A v7.2 + Corte v17 + Bloque G v1"
+CRANIOPLAN_VERSION = "2026-09-25 - Bloque A v7.2 + Corte v17 + Bloque G v1.1"
 
 # --- Colores de los carteles de estado ---
 GRIS    = "color: #777777;"
@@ -967,17 +970,30 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                              "" if p["watertight"] else "   (malla abierta)"))
         if resultado["noSepararon"]:
             lineas.append("")
-            lineas.append("ATENCION: %d corte(s) quedaron marcados pero NO "
-                          "separaron el hueso: %s. Mirá los puntos rojos de la "
-                          "previsualizacion y agregá una linea por la otra cara."
+            lineas.append("ATENCION: %d linea(s) quedaron marcadas pero NO "
+                          "separaron el hueso: %s. La pieza que tenia que "
+                          "salir sigue pegada al resto del craneo, asi que en "
+                          "el Paso 4 no se va a poder mover sola. Mirá los "
+                          "puntos rojos de la previsualizacion, corregí esa "
+                          "linea y volvé a cortar."
                           % (len(resultado["noSepararon"]),
                              ", ".join(resultado["noSepararon"])))
             lineas.append("Recordá: una linea abierta sola nunca separa una "
                           "pieza del craneo. Para separarla, las lineas tienen "
                           "que cerrar una vuelta completa, unidas en los dos "
                           "extremos.")
+        puente = resultado.get("puente")
+        if puente and puente["desconocidas"]:
+            lineas.append("")
+            lineas.append("AVISO: %d pieza(s) quedaron sin clasificar: %s. En "
+                          "el Paso 4 se decide si se mueven segun lo cerca que "
+                          "esten de una linea de corte."
+                          % (len(puente["desconocidas"]),
+                             ", ".join(puente["desconocidas"])))
+        hayAvisos = bool(resultado["noSepararon"]) or bool(
+            puente and puente["desconocidas"])
         self._poner(self.estadoCorte, "\n".join(lineas),
-                    AMBAR if resultado["noSepararon"] else VERDE)
+                    AMBAR if hayAvisos else VERDE)
 
         self._habilitar(self.paso4, True)
         self._habilitar(self.paso5, True)
@@ -1109,6 +1125,12 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "Crea tres puntos (nasion, bregma, inion) para comprobar que la "
             "cabeza no este torcida en la tomografia, que sesgaria las medidas.")
         filaMedidas.addWidget(self.botonLandmarks)
+        self.botonHuecos = qt.QPushButton("Ver separacion entre piezas")
+        self.botonHuecos.toolTip = (
+            "Para cada pieza, cuantos milimetros la separan de la pieza mas "
+            "cercana. Sirve para decidir donde hace falta injerto o placa. "
+            "0 mm = se tocan o se superponen.")
+        filaMedidas.addWidget(self.botonHuecos)
         self.botonResetear = qt.QPushButton("Devolver todo a su lugar")
         filaMedidas.addWidget(self.botonResetear)
         caja.addLayout(filaMedidas)
@@ -1123,6 +1145,7 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.botonMedidas.connect("clicked(bool)", self.onVerMedidas)
         self.botonLandmarks.connect("clicked(bool)", self.onMarcarLineaMedia)
         self.botonResetear.connect("clicked(bool)", self.onResetearPiezas)
+        self.botonHuecos.connect("clicked(bool)", self.onVerHuecos)
 
     def onPrepararPiezas(self):
         self._esperando(self.estadoPiezas, "Preparando las piezas...")
@@ -1174,6 +1197,22 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             botonMover.setEnabled(f["movible"])
             cajaFila.addWidget(botonMover)
 
+            # Corrige el criterio automatico: una pieza que no toco ningun
+            # corte queda fija, y una que paso cerca de una linea queda movible.
+            if f["preexistente"]:
+                botonFija = qt.QPushButton("Liberar")
+                botonFija.toolTip = ("Esta pieza quedo fija porque ninguna "
+                                     "linea de corte pasa cerca. Liberala "
+                                     "si hay que moverla.")
+            else:
+                botonFija = qt.QPushButton("Dejar fija")
+                botonFija.toolTip = ("Para piezas que no se tienen que mover "
+                                     "(mandibula, vertebras, tubos) y quedaron "
+                                     "movibles por estar cerca de una linea.")
+            botonFija.setFixedWidth(80)
+            botonFija.setEnabled(not f["esAncla"] and f["activa"])
+            cajaFila.addWidget(botonFija)
+
             botonBase = qt.QPushButton("Es la base")
             botonBase.setFixedWidth(80)
             botonBase.setEnabled(not f["esAncla"] and f["activa"])
@@ -1196,6 +1235,10 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                                lambda _c, n=nombre: self.onSeleccionarPieza(n))
             botonBase.connect("clicked(bool)",
                               lambda _c, n=nombre: self.onFijarBase(n))
+            preexistente = f["preexistente"]
+            botonFija.connect(
+                "clicked(bool)",
+                lambda _c, n=nombre, pre=preexistente: self.onFijarOLiberar(n, pre))
             activa = f["activa"]
             botonQuitar.connect(
                 "clicked(bool)",
@@ -1219,6 +1262,20 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._refrescarFragmentos()
         self._poner(self.estadoPiezas,
                     "'%s' quedo como base fija del armado." % nombre, AZUL)
+
+    def onFijarOLiberar(self, nombre, estabaFija):
+        if estabaFija:
+            self.logic.bloqueG.liberar_pieza(nombre)
+            texto = "'%s' ahora se puede mover." % nombre
+        else:
+            self.logic.bloqueG.fijar_pieza(nombre)
+            texto = ("'%s' queda fija y no se cuenta en las medidas."
+                     % nombre)
+            if self._piezaSeleccionada == nombre:
+                self._piezaSeleccionada = None
+                self.panelMovimiento.setVisible(False)
+        self._refrescarFragmentos()
+        self._poner(self.estadoPiezas, texto, AZUL)
 
     def onSacarODevolver(self, nombre, estabaActiva):
         if estabaActiva:
@@ -1281,11 +1338,11 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     "Craneo actual: %.0f mm de largo por %.0f mm de ancho "
                     "(indice cefalico %.1f).\n"
                     "Objetivo: %.0f x %.0f mm (indice %.1f).\n"
-                    "Hay que acortar %.0f mm de adelante hacia atras y ensanchar "
-                    "%.0f mm a lo ancho."
+                    "Moviendo las piezas se puede acortar de adelante hacia "
+                    "atras; el ancho no se gana moviendo placas enteras."
                     % (info["largoActual"], info["anchoActual"], info["icActual"],
                        info["largoObjetivo"], info["anchoObjetivo"],
-                       info["icObjetivo"], info["acortar"], info["ensanchar"]),
+                       info["icObjetivo"]),
                     AZUL)
 
     def onVerMedidas(self):
@@ -1310,10 +1367,18 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if m["descartadas"]:
             lineas.append("Hueso resecado: %.1f cm3 en %d pieza(s)."
                           % (m["volumenDescartado"], len(m["descartadas"])))
+        if m["nivelS"] is None:
+            lineas.append("ATENCION: el indice se midio sobre todo el craneo, "
+                          "incluida la base y la cara, asi que puede no ser "
+                          "exacto (suele salir mas bajo que el real).")
+        if m["excluidas"]:
+            lineas.append("No se cuentan en las medidas (no las toco ningun "
+                          "corte): %s." % ", ".join(m["excluidas"]))
         if m["avisoInclinacion"]:
             lineas.append("ATENCION: " + m["avisoInclinacion"])
         self._poner(self.estadoMedidas, "\n".join(lineas),
-                    AMBAR if m["avisoInclinacion"] else AZUL)
+                    AMBAR if (m["avisoInclinacion"] or m["nivelS"] is None)
+                    else AZUL)
 
     def onMarcarLineaMedia(self):
         self.logic.bloqueG.landmarks()
@@ -1322,6 +1387,30 @@ class CranioPlanWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     "el craneo desde el modulo Markups (nasion en la raiz de la "
                     "nariz, bregma arriba, inion atras) y despues volvé a "
                     "'Ver las medidas'.", AZUL)
+
+    def onVerHuecos(self):
+        self._esperando(self.estadoMedidas,
+                        "Midiendo la separacion entre piezas...")
+        inicio = time.time()
+        try:
+            filas = self.logic.bloqueG.huecos()
+        finally:
+            self._listo()
+        segundos = time.time() - inicio
+        self.logic.log("Separacion entre piezas calculada en %.1f s." % segundos)
+        if not filas:
+            self._poner(self.estadoMedidas,
+                        "Hacen falta al menos dos piezas en el armado.", ROJO)
+            return
+        lineas = ["Separacion de cada pieza con la mas cercana:"]
+        for h in filas:
+            nombre = h["pieza"] + (" (%s)" % h["etiqueta"] if h["etiqueta"] else "")
+            lineas.append("   %-24s -> %-22s %5.1f mm"
+                          % (nombre, h["vecina"] or "-", h["mm"]))
+        lineas.append("0 mm = las piezas se tocan o se superponen (el modulo "
+                      "no detecta superposiciones). Es una medida aproximada.")
+        lineas.append("(calculado en %.1f s)" % segundos)
+        self._poner(self.estadoMedidas, "\n".join(lineas), AZUL)
 
     def onResetearPiezas(self):
         n = self.logic.bloqueG.resetear()
@@ -1493,6 +1582,7 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
         # pegable en la consola tal cual). Se le enchufa el mismo log y el
         # prefijo de curvas para que no agarre curvas viejas de la escena.
         BloqueF.configurar(log=self.log, PREFIJO_CURVAS=Comun.PREFIJO_CURVA_CORTE)
+        PuenteFG.configurar(log=self.log)
 
     def getParameterNode(self):
         return CranioPlanParameterNode(super().getParameterNode())
@@ -1585,7 +1675,13 @@ class CranioPlanLogic(ScriptedLoadableModuleLogic):
 
     def cortar(self, grosorMM):
         BloqueF.configurar(GROSOR_CORTE_MM=float(grosorMM))
-        return BloqueF.cortar()
+        resultado = BloqueF.cortar()
+        if resultado is not None:
+            # Puente F -> G: deja los nombres Tapa_/Resto_/Hueso_ y los
+            # atributos CranioPlan.* en cada pieza, sin que el medico apriete
+            # nada. Con el Bloque F arreglado solo escribe los atributos.
+            resultado["puente"] = PuenteFG.puente()
+        return resultado
 
     # -------- Paso 4 --------
     def prepararPiezas(self):

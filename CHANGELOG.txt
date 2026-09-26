@@ -2,6 +2,94 @@
 CRANIOPLAN - CHANGELOG
 ============================================================
 
+2026-09-25 - Paso 4: botones "Dejar fija" / "Liberar" y separacion entre piezas
+------------------------------------------------------------
+Expone en la interfaz lo que el Bloque G v1.1 ya tenia:
+  - Por fila, "Dejar fija" (fijar_pieza) o "Liberar" (liberar_pieza), para
+    corregir el criterio automatico: una mandibula, vertebra o tubo que paso
+    cerca de una linea queda movible; una pieza que ninguna linea toco queda
+    fija. Dejar fija una pieza movida la devuelve a su lugar original.
+  - "Ver separacion entre piezas" (huecos()): mm de cada pieza a la vecina
+    mas cercana. Informa el tiempo que tardo (en el panel y en el Detalle
+    tecnico), porque hoy recorre puntos con bucles Python.
+
+2026-09-25 - Bloque G v1 -> v1.1 (integra desarrollo/valentino/Bloque_G_V1.1.py)
+------------------------------------------------------------
+CranioPlanLib/BloqueG.py pasa a v1.1 con la logica del script (verificado
+con ast: las funciones de utilidad son identicas y los metodos solo difieren
+en el envoltorio: valores de retorno, dicts para la interfaz, estado en la
+clase en vez de variables globales, icObjetivo elegido en la interfaz).
+Se conserva la clase BloqueG del modulo (V1.1 volvio a variables globales:
+eso no se trae).
+  - [F1] Movilidad por contacto geometrico con las curvas de corte
+    (UMBRAL_CONTACTO_MM = 5mm), ya no por el prefijo del nombre. Si no hay
+    curvas en la escena, respaldo por nombre (Hueso_ = fija).
+  - [F2] IC solo sobre piezas craneales (se excluyen las que no toco ningun
+    corte) y por encima del nivel de boveda. El nivel sale de una curva
+    CERRADA; el modulo solo usa lineas abiertas, asi que en el modulo se
+    mide sin nivel y "Ver las medidas" lo avisa en lenguaje llano.
+  - [F3] huecos(): distancia de cada pieza a su vecina mas cercana (sin
+    boton todavia; va en el commit siguiente).
+  - Nuevos: fijar_pieza() / liberar_pieza() (sin boton todavia).
+CranioPlan.py: version "Bloque G v1.1", tabla de piezas con el estado
+"fija (no la toco ningun corte)", aviso de IC medido sin nivel, piezas
+excluidas de las medidas, y el cartel del craneo objetivo ya no dice
+"ensanchar X mm" (con movimientos rigidos no se gana ancho).
+Casos de falla identificados por revision de codigo (no observados todavia
+en casos reales): ver encabezado de BloqueG.py.
+
+PENDIENTES Bloque G V1.2 (primero en el script de consola)
+------------------------------------------------------------
+  (a) Indice cefalico por puntos anatomicos, reemplazando el nivel de
+      boveda por curva cerrada (el modulo solo usa lineas abiertas, asi que
+      ese nivel no existe):
+        - El medico marca 4 puntos sobre el modelo 3D: glabela (adelante,
+          entre las cejas), opistocraneo (punto mas posterior) y euryon
+          izquierdo y derecho (puntos mas laterales).
+        - IC = distancia euryon-euryon / distancia glabela-opistocraneo x 100.
+        - Semiautomatico: el algoritmo ajusta cada punto al extremo real (mas
+          anterior, posterior o lateral) dentro de un radio chico (por
+          ejemplo 10 mm) alrededor de donde lo marco el medico.
+        - Se puede medir antes de planificar (IC preoperatorio), sin
+          depender de los cortes.
+        - Para el IC despues del reacomodamiento, cada punto tiene que quedar
+          colgado de la transformacion de la pieza sobre la que esta
+          apoyado, para que se mueva con ella.
+        - Antes de implementarlo, confirmar con el equipo del Garrahan que
+          puntos usan (glabela o nasion para el largo).
+  (b) Considerar solo curvas Corte_, no todas las curvas de la escena.
+  (c) Vectorizar huecos() y _distancia_a_curvas() (hoy recorren puntos con
+      bucles Python).
+  Ademas: pendiente que Nacho aplique el arreglo AddEmptySegment(nombre,
+  nombre) en desarrollo/nacho/corte_V17.py.
+
+2026-09-25 - Puente F -> G como archivo propio (CranioPlanLib/PuenteFG.py)
+------------------------------------------------------------
+Se integra desarrollo/valentino/PuenteF_G.py como CranioPlanLib/PuenteFG.py
+con la logica identica (verificado con ast; solo cambia el envoltorio:
+_p() en vez de print, puente() devuelve un dict, nombres desde Comun.py).
+Agregado a CMakeLists.txt y a recargar().
+La Logic lo llama automaticamente despues de cortar(), sin boton. Con el
+arreglo de AddEmptySegment reporta "Los nombres ya estan bien" y solo
+escribe los atributos CranioPlan.origen / tipo / curva.
+Paso 3: el aviso de lineas que no separaron ahora explica la consecuencia
+(la pieza sigue pegada y en el Paso 4 no se puede mover sola) y se avisa si
+el puente dejo piezas sin clasificar.
+Limite conocido (no se arregla ahora): si un corte grabo pero no separo, la
+pieza sale como Hueso_ (preexistente) aunque el corte la haya tocado.
+
+2026-09-25 - Bloque F v17: arreglo del contrato F -> G (AddEmptySegment)
+------------------------------------------------------------
+En cortar(), AddEmptySegment(nombre) pasaba el nombre como ID del segmento:
+el nombre quedaba vacio, Slicer autogeneraba "Segment_N" y los modelos
+exportados perdian los prefijos Tapa_/Resto_/Fragmento_/Hueso_ que usa el
+Bloque G (y el control de calidad de cortar(), que busca los modelos por
+nombre). Ahora es AddEmptySegment(nombre, nombre).
+Es la UNICA diferencia algoritmica de CranioPlanLib/BloqueF.py respecto de
+desarrollo/nacho/corte_V17.py (documentada en el encabezado).
+PENDIENTE: que Nacho aplique el mismo arreglo en corte_V17.py (no se
+modifico desde aca).
+
 2026-09-25 - Version del modulo en la consola
 ------------------------------------------------------------
 CRANIOPLAN_VERSION pasa a "2026-09-25 - Bloque A v7.2 + Corte v17 +
@@ -98,7 +186,7 @@ paths debe apuntar a la subcarpeta CranioPlan/, no a la raiz del repo).
 PENDIENTES (no se integran en este cambio, quedan para un PR aparte):
   - (HECHO, ver entrada "Bloque F v16 -> v17") Portar a
     CranioPlanLib/BloqueF.py las mejoras de desarrollo/nacho/corte_V17.py.
-  - Portar a CranioPlanLib/BloqueG.py las mejoras de
+  - (HECHO, ver entrada "Bloque G v1 -> v1.1") Portar a CranioPlanLib/BloqueG.py las mejoras de
     desarrollo/valentino/Bloque_G_V1.1.py: movilidad de piezas por
     distancia geometrica a las curvas de corte, indice craneal acotado a
     la boveda, y la funcion huecos(). Sin perder la arquitectura de clase
